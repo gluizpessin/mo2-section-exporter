@@ -19,7 +19,9 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 - **Game-specific checks:** Plugin-master, SKSE, HDT-SMP, and stock-file detection currently target Skyrim Special Edition and Anniversary Edition.
 - **Import scope:** Individual ZIPs restore left-pane mod priority and enabled states. Check the destination's plugin load order separately.
 
-See the [changelog](CHANGELOG.md) for the initial feature list.
+See the [changelog](CHANGELOG.md) for released features and the [roadmap](ROADMAP.md) for planned work.
+
+The separate v0.2.0 preview adds game detection, configured MO2 paths, and game-mismatch protection. Both ZIP formats passed synthetic Cyberpunk 2077 transfer tests. Live Cyberpunk validation is pending. The GitHub prerelease remains v0.1.0.
 
 ## How to
 
