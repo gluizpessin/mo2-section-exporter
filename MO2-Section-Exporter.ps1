@@ -1,6 +1,6 @@
 param([switch]$CoreOnly)
 $ErrorActionPreference = 'Stop'
-$AppVersion = '0.1.2'
+$AppVersion = '0.1.3'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -94,6 +94,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
     $folder = Join-Path $Destination $folderName
     $null = New-Item -Path $folder -ItemType Directory
     $manifest = [ordered]@{ version = 1; source = (Split-Path $Source -Leaf); profile = $Profile; section = $Section; mods = @() }
+    $manifest.sha256 = [ordered]@{}
     $manifest.format = if ($Merged) { 'merged' } else { 'individual' }
     try {
         $jobs = if ($Merged) {
@@ -198,6 +199,9 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
                     if ($archived -ne $sourceFiles[$entry.FullName]) { throw "ZIP verification failed for $($entry.FullName)." }
                 }
             } finally { $archive.Dispose() }
+            $Cancellation.ThrowIfCancellationRequested()
+            $manifest.sha256[$filename] = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash
+            $Cancellation.ThrowIfCancellationRequested()
             [IO.File]::Move($partial, (Join-Path $folder $filename))
         }
         $Cancellation.ThrowIfCancellationRequested()
@@ -388,7 +392,7 @@ function Assert-ImportName([string]$Name) {
     }
 }
 
-function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName) {
+function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName, [switch]$Preview) {
     Assert-ImportName $SeparatorName
     Assert-ImportName $ProfileName
     $profile = Join-Path (Join-Path $Target 'profiles') $ProfileName
@@ -413,13 +417,18 @@ function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName) {
     })
     $existing = [IO.File]::ReadAllLines($profilePath)
     $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $collisions = [Collections.Generic.List[string]]::new()
     foreach ($name in @($separator) + @($jobs.Name)) {
         Assert-ImportName $name
         if (!$names.Add($name) -or (Test-Path -LiteralPath (Join-Path $mods $name)) -or
             ($existing -contains "+$name") -or ($existing -contains "-$name")) {
-            throw "A mod or separator already uses this name: $name. Choose another separator or resolve the duplicate mod first."
+            $collisions.Add($name)
         }
     }
+    if ($collisions.Count -and !$Preview) {
+        throw "A mod or separator already uses this name: $($collisions -join ', ')."
+    }
+    [long]$unpackedBytes = 0
     foreach ($job in $jobs) {
         if ($job.Name.EndsWith('_separator', [StringComparison]::OrdinalIgnoreCase)) { throw "Invalid mod name: $($job.Name)" }
         Assert-ImportName $job.Archive
@@ -427,9 +436,27 @@ function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName) {
         $archive = Join-Path $Package $job.Archive
         Assert-OrdinaryPath $archive
         if (!(Test-Path -LiteralPath $archive -PathType Leaf)) { throw "ZIP is missing: $($job.Archive)" }
+        $job | Add-Member -NotePropertyName Hash -NotePropertyValue ''
+        if ($null -ne $manifest.sha256) {
+            $checksum = $manifest.sha256.PSObject.Properties[$job.Archive]
+            if (!$checksum -or [string]$checksum.Value -notmatch '^[a-fA-F0-9]{64}$') {
+                throw "Missing or invalid SHA-256 for $($job.Archive)."
+            }
+            $job.Hash = [string]$checksum.Value
+        }
+        if ($Preview) {
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            try {
+                foreach ($entry in $zip.Entries) { $unpackedBytes += $entry.Length }
+            } finally { $zip.Dispose() }
+        }
         $job.Archive = $archive
     }
-    [pscustomobject]@{ Mods = $mods; Profile = $profilePath; Existing = $existing; Separator = $separator; Jobs = $jobs }
+    [pscustomobject]@{
+        Mods = $mods; Profile = $profilePath; Existing = $existing; Separator = $separator; Jobs = $jobs
+        Collisions = @($collisions.ToArray()); UnpackedBytes = $unpackedBytes
+        FreeBytes = (Get-Item -LiteralPath $mods).PSDrive.Free; HasChecksums = $null -ne $manifest.sha256
+    }
 }
 
 function Assert-Mo2Closed {
@@ -452,8 +479,17 @@ function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report
             & $Report "Extracting $($job.Name)..."
             $modFolder = Join-Path $stage $job.Name
             $null = New-Item -Path $modFolder -ItemType Directory
-            $zip = [IO.Compression.ZipFile]::OpenRead($job.Archive)
+            $archiveStream = [IO.File]::OpenRead($job.Archive)
             try {
+                if ($job.Hash) {
+                    & $Report "Verifying $($job.Name)..."
+                    if ((Get-FileHash -InputStream $archiveStream -Algorithm SHA256).Hash -ine $job.Hash) {
+                        throw "SHA-256 mismatch for $($job.Name). The ZIP differs from the original export."
+                    }
+                    $archiveStream.Position = 0
+                }
+                $zip = [IO.Compression.ZipArchive]::new($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $true)
+                try {
                 if (!$zip.Entries.Count) { throw "ZIP is empty: $($job.Archive)" }
                 foreach ($entry in $zip.Entries) {
                     $entryPath = $entry.FullName.Replace('\','/')
@@ -473,7 +509,8 @@ function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report
                         } finally { $file.Dispose() }
                     } finally { $input.Dispose() }
                 }
-            } finally { $zip.Dispose() }
+                } finally { $zip.Dispose() }
+            } finally { $archiveStream.Dispose() }
         }
         $separatorFolder = Join-Path $stage $plan.Separator
         $null = New-Item -Path $separatorFolder -ItemType Directory
@@ -1261,7 +1298,7 @@ function Show-ImportWindow {
     $statusImport = Add-Field Label 'Close MO2 before importing. The destination profile will be backed up.' 26 309 688 68
     $statusImport.ForeColor = $muted
     $back = Add-Field Button 'Back' 26 395 100 38
-    $go = Add-Field Button 'Import section' 535 393 178 42
+    $go = Add-Field Button 'Preview.' 535 393 178 42
     $go.FlatStyle = 'Flat'
     $go.BackColor = $accent
     $go.ForeColor = [Drawing.Color]::White
@@ -1317,6 +1354,55 @@ function Show-ImportWindow {
         try {
             $result = $job.Worker.EndInvoke($job.Handle)[0]
             if ($job.Worker.HadErrors) { throw $job.Worker.Streams.Error[0] }
+            if ($job.Preview) {
+                $summary = @(
+                    "Destination profile: $($result.Profile)"
+                    "New separator: $($newSeparator.Text)"
+                    "Mods: $($result.Jobs.Count)"
+                    ('Estimated extraction size: {0:N1} MiB' -f ($result.UnpackedBytes / 1MB))
+                )
+                if ($null -ne $result.FreeBytes) { $summary += ('Destination free space: {0:N1} MiB' -f ($result.FreeBytes / 1MB)) }
+                $summary += if ($result.HasChecksums) { 'ZIP checksums will be verified during import.' } else { 'Older export. ZIP checksums are unavailable.' }
+                $blocked = $result.Collisions.Count -gt 0 -or ($null -ne $result.FreeBytes -and $result.FreeBytes -lt $result.UnpackedBytes)
+                if ($result.Collisions.Count) { $summary += 'Name collisions: ' + ($result.Collisions -join ', ') }
+                if ($null -ne $result.FreeBytes -and $result.FreeBytes -lt $result.UnpackedBytes) { $summary += 'The destination has insufficient free space.' }
+                $summary += ''
+                $summary += @($result.Jobs | ForEach-Object { $_.Name + $(if ($_.Enabled) { ' (enabled)' } else { ' (disabled)' }) })
+                $preview = New-Object Windows.Forms.Form
+                $preview.Text = 'Import preview'
+                $preview.ClientSize = New-Object Drawing.Size(660, 450)
+                $preview.MinimumSize = $preview.Size
+                $preview.StartPosition = 'CenterParent'
+                $preview.BackColor = $w.BackColor
+                $preview.ForeColor = $w.ForeColor
+                $preview.Font = $w.Font
+                $details = New-Object Windows.Forms.TextBox
+                $details.SetBounds(16,16,628,359)
+                $details.Multiline = $true
+                $details.ReadOnly = $true
+                $details.ScrollBars = 'Vertical'
+                $details.Anchor = 'Top,Bottom,Left,Right'
+                $details.Text = $summary -join [Environment]::NewLine
+                $preview.Controls.Add($details)
+                $cancel = New-Object Windows.Forms.Button
+                $cancel.Text = Get-UiText 'Back'
+                $cancel.DialogResult = 'Cancel'
+                $cancel.SetBounds(16,398,110,34)
+                $cancel.Anchor = 'Bottom,Left'
+                $preview.Controls.Add($cancel)
+                $confirm = New-Object Windows.Forms.Button
+                $confirm.Text = Get-UiText 'Import section'
+                $confirm.DialogResult = 'OK'
+                $confirm.Enabled = !$blocked
+                $confirm.SetBounds(483,398,161,34)
+                $confirm.Anchor = 'Bottom,Right'
+                $preview.Controls.Add($confirm)
+                $preview.CancelButton = $cancel
+                try { $confirmed = $preview.ShowDialog($w) -eq 'OK' } finally { $preview.Dispose() }
+                $statusImport.Text = if ($blocked) { 'Change the destination or resolve the conflicts shown in the preview.' } else { 'Review the destination before importing.' }
+                if ($confirmed) { $script:confirmedImport = $true }
+                return
+            }
             $statusImport.Text = "Imported $($result.Count) mod(s) under $($result.Separator)."
             [void][Windows.Forms.MessageBox]::Show($w, "$($statusImport.Text)$([Environment]::NewLine)Profile backup: $($result.Backup)", $w.Text)
         } catch { $statusImport.Text = $_.Exception.Message }
@@ -1324,9 +1410,11 @@ function Show-ImportWindow {
             $job.Worker.Dispose()
             $script:importWorker = $null
             foreach ($item in $inputs) { $item.Enabled = $true }
+            if ($script:confirmedImport) { Start-ImportWork $false }
         }
     })
-    $go.Add_Click({
+    function Start-ImportWork([bool]$Preview) {
+        $script:confirmedImport = $false
         if (!$package.Text -or !$targetProfile.SelectedItem -or !$newSeparator.Text.Trim()) {
             $statusImport.Text = 'Choose an export folder, destination profile, and separator name.'
             return
@@ -1335,17 +1423,19 @@ function Show-ImportWindow {
         $queueImport = [Collections.Concurrent.ConcurrentQueue[string]]::new()
         try {
             $null = $workerImport.AddScript({
-                param($Script,$Package,$Target,$Profile,$Separator,$Queue)
+                param($Script,$Package,$Target,$Profile,$Separator,$Queue,$Preview)
                 . $Script -CoreOnly
-                Import-Section $Package $Target $Profile $Separator { param($message); $Queue.Enqueue($message) }
+                if ($Preview) { Get-ImportPlan $Package $Target $Profile $Separator -Preview }
+                else { Import-Section $Package $Target $Profile $Separator { param($message); $Queue.Enqueue($message) } }
             }).AddArgument($scriptFile).AddArgument($package.Text).AddArgument([string]$target.SelectedItem).
-                AddArgument([string]$targetProfile.SelectedItem).AddArgument($newSeparator.Text.Trim()).AddArgument($queueImport)
-            $script:importWorker = @{ Worker = $workerImport; Queue = $queueImport; Handle = $workerImport.BeginInvoke() }
+                AddArgument([string]$targetProfile.SelectedItem).AddArgument($newSeparator.Text.Trim()).AddArgument($queueImport).AddArgument($Preview)
+            $script:importWorker = @{ Preview = $Preview; Worker = $workerImport; Queue = $queueImport; Handle = $workerImport.BeginInvoke() }
             foreach ($item in $inputs) { $item.Enabled = $false }
             $statusImport.Text = 'Checking import files...'
             $importTimer.Start()
         } catch { $workerImport.Dispose(); $statusImport.Text = $_.Exception.Message }
-    })
+    }
+    $go.Add_Click({ Start-ImportWork $true })
     $w.ForeColor = $form.ForeColor
     foreach ($field in $package,$target,$targetProfile,$newSeparator,$packageButton,$targetButton,$back) {
         $field.BackColor = $surface
