@@ -44,6 +44,10 @@ Start the app and choose **Export section** or **Import section**.
 
 The guided interface supports light and dark modes. Export progress, average speed, and elapsed time are displayed locally.
 
+The export screen shows the source profile, separator, mod checklist, and export options. Choose **Individual ZIPs** or **Single merged ZIP**, then leave **Review dependencies before export** enabled or clear it to export directly.
+
+![Export screen with the mod checklist, archive format, and dependency review toggle](docs/mo2-export.png)
+
 ### Import
 
 1. Close Mod Organizer 2, then choose **Import section**.
