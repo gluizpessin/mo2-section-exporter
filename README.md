@@ -1,5 +1,7 @@
 # MO2 Section Exporter
 
+> **Work in progress.** The app is under active development. Keep your source modlist until you’ve verified the export and checked the imported section in the destination MO2 profile.
+
 Portable Windows utility for carrying selected Skyrim Special Edition mods between Mod Organizer 2 instances.
 
 ## Benefits
