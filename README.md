@@ -57,9 +57,11 @@ The review follows declared plugin masters and shows which mod requires each one
 
 Recognized Skyrim stock files are excluded from both export formats. The destination modlist is expected to supply them. Loose replacers installed by mods are exported normally.
 
-## Build
+## Build from source
 
-Run in Windows PowerShell:
+To run the app, download the portable EXE from [GitHub Releases](https://github.com/gluizpessin/mo2-section-exporter/releases) and open it directly.
+
+To build your own copy, open Windows PowerShell in the repository folder and run the following command.
 
     .\Build.ps1
 
