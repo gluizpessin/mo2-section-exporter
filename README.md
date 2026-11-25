@@ -4,6 +4,13 @@
 
 Portable Windows utility for transferring selected mod sections between Mod Organizer 2 instances across games.
 
+## Download
+
+- [Download v0.1.0 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.0/MO2-Section-Exporter-v0.1.0.exe)
+- [Download v0.2.0 Preview for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.2.0-preview/MO2-Section-Exporter-v0.2.0-preview.exe) — experimental support for Cyberpunk 2077 and other MO2 games.
+
+Open the downloaded EXE directly.
+
 ## Benefits
 
 - **Run one portable EXE across MO2 instances.** Use the same app for every supported portable instance without installing a plugin in each modlist.
@@ -59,7 +66,7 @@ Recognized Skyrim stock files are excluded from both export formats. The destina
 
 ## Build from source
 
-To run the app, download the portable EXE from [GitHub Releases](https://github.com/gluizpessin/mo2-section-exporter/releases) and open it directly.
+To run the app, use a [direct EXE download](#download) above.
 
 To build your own copy, open Windows PowerShell in the repository folder and run the following command.
 
