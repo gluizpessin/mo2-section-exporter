@@ -7,7 +7,6 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 ## Download
 
 - [Download v0.1.1 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.1/MO2-Section-Exporter-v0.1.1.exe)
-- [Download v0.2.0 Preview for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.2.0-preview/MO2-Section-Exporter-v0.2.0-preview.exe) — experimental support for Cyberpunk 2077 and other MO2 games.
 
 Open the downloaded EXE directly.
 
@@ -27,8 +26,6 @@ Open the downloaded EXE directly.
 - **Import scope:** Individual ZIPs restore left-pane mod priority and enabled states. Check the destination's plugin load order separately.
 
 See the [changelog](CHANGELOG.md) for released features and the [roadmap](ROADMAP.md) for planned work.
-
-The [experimental v0.2.0 preview](https://github.com/gluizpessin/mo2-section-exporter/releases/tag/v0.2.0-preview) adds game detection, configured MO2 paths, and game-mismatch protection. Both ZIP formats passed synthetic Cyberpunk 2077 transfer tests. Live Cyberpunk validation is pending.
 
 ## How to
 
