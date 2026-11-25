@@ -2,7 +2,7 @@
 
 > **Work in progress.** The app is under active development. Keep your source modlist until you’ve verified the export and checked the imported section in the destination MO2 profile.
 
-Portable Windows utility for carrying selected Skyrim Special Edition mods between Mod Organizer 2 instances.
+Portable Windows utility for transferring selected mod sections between Mod Organizer 2 instances across games.
 
 ## Benefits
 
@@ -11,6 +11,15 @@ Portable Windows utility for carrying selected Skyrim Special Edition mods betwe
 - **Reuse mods as configured.** The archives capture installed files, including FOMOD choices and local edits. Individual ZIPs restore separate entries with their relative priority and enabled states.
 - **Review dependencies before moving.** See which mod requires each detected plugin master and flag SKSE or HDT-SMP runtime requirements for review.
 - **Import in one pass.** Create a named separator in the destination profile. The importer checks for name collisions and backs up the profile's mod list.
+
+## Compatibility
+
+- **Platform:** Windows with its built-in Windows PowerShell runtime.
+- **MO2:** Import and export use the standard portable instance layout and are intended for games managed by MO2. The current build has been exercised with Skyrim profiles and synthetic fixtures. Other games have yet to be validated.
+- **Game-specific checks:** Plugin-master, SKSE, HDT-SMP, and stock-file detection currently target Skyrim Special Edition and Anniversary Edition.
+- **Import scope:** Individual ZIPs restore left-pane mod priority and enabled states. Check the destination's plugin load order separately.
+
+See the [changelog](CHANGELOG.md) for the initial feature list.
 
 ## How to
 
