@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Cancel dependency review or an active export and return to the selection.
+- Optionally skip dependency review before export.
+- Resize the main, review, and import windows and see the version in the footer.
+- Check for updates on startup. Update and open the new executable or hide the offer and keep the current version.
+
 ## 0.1.0
 
 First public prerelease.
