@@ -3,6 +3,40 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+function Resolve-Mo2Path($Value, $Base, $Fallback) {
+    if (!$Value) { return [IO.Path]::GetFullPath((Join-Path $Base $Fallback)) }
+    $value = $Value.Replace('%BASE_DIR%', $Base).Replace('/', '\')
+    if (![IO.Path]::IsPathRooted($value)) { $value = Join-Path $Base $value }
+    [IO.Path]::GetFullPath($value)
+}
+
+function Get-Mo2Layout($Root) {
+    $ini = Join-Path $Root 'ModOrganizer.ini'
+    $values = @{}
+    if (Test-Path -LiteralPath $ini -PathType Leaf) {
+        foreach ($line in [IO.File]::ReadAllLines($ini)) {
+            if ($line -match '^\s*(gameName|base_directory|mod_directory|profiles_directory)\s*=\s*(.*?)\s*$') {
+                $key = $Matches[1]
+                $value = $Matches[2].Trim('"')
+                if ($value.StartsWith('@ByteArray(') -and $value.EndsWith(')')) {
+                    $value = $value.Substring(11, $value.Length - 12)
+                }
+                $values[$key] = $value.Replace('\\','\')
+            }
+        }
+    }
+    $base = Resolve-Mo2Path $values.base_directory $Root '.'
+    $game = [string]$values.gameName
+    if ($game -match '^(?:Skyrim Special Edition|Skyrim Anniversary Edition|SkyrimSE)$') { $game = 'Skyrim Special Edition' }
+    if ($game -match '^Cyberpunk\s*2077$') { $game = 'Cyberpunk 2077' }
+    [pscustomobject]@{
+        Game = $game
+        IsSkyrim = $game -eq 'Skyrim Special Edition'
+        Mods = Resolve-Mo2Path $values.mod_directory $base 'mods'
+        Profiles = Resolve-Mo2Path $values.profiles_directory $base 'profiles'
+    }
+}
+
 function Get-Sections($Profile, $Mods) {
     $lines = [IO.File]::ReadAllLines((Join-Path $Profile 'modlist.txt'))
     [array]::Reverse($lines)
@@ -53,7 +87,8 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
     $Source = (Get-Item -LiteralPath $Source).FullName
     $Destination = (Get-Item -LiteralPath $Destination).FullName
     Assert-OrdinaryPath $Destination
-    if (Test-Within $Destination $Source) { throw 'Choose an export location outside the source modlist.' }
+    $layout = Get-Mo2Layout $Source
+    if ((Test-Within $Destination $Source) -or (Test-Within $Destination $layout.Mods) -or (Test-Within $Destination $layout.Profiles)) { throw 'Choose an export location outside the source modlist.' }
     $safeSection = ($Section -replace '[<>:"/\\|?*\x00-\x1f]', '_').Trim(' ','.')
     if (!$safeSection) { $safeSection = 'Section' }
     & $Report 'Checking selected mod files...'
@@ -68,7 +103,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
         $files = @($children | Where-Object { !$_.PSIsContainer })
         if (!$files.Count) { throw "This mod has no files: $($mod.Name)" }
         $stockFiles = @($files | Where-Object {
-            Test-BaseGameFile $_.FullName.Substring($mod.Path.Length + 1)
+            $layout.IsSkyrim -and (Test-BaseGameFile $_.FullName.Substring($mod.Path.Length + 1))
         })
         if ($stockFiles.Count) {
             $files = @($files | Where-Object { $_ -notin $stockFiles })
@@ -91,7 +126,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
     $folderName = '{0} - {1} - {2}' -f (Split-Path $Source -Leaf), $safeSection, (Get-Date -Format 'yyyyMMdd-HHmmss-fff')
     $folder = Join-Path $Destination $folderName
     $null = New-Item -Path $folder -ItemType Directory
-    $manifest = [ordered]@{ version = 1; source = (Split-Path $Source -Leaf); profile = $Profile; section = $Section; mods = @() }
+    $manifest = [ordered]@{ version = 1; source = (Split-Path $Source -Leaf); profile = $Profile; section = $Section; game = $layout.Game; mods = @() }
     $manifest.format = if ($Merged) { 'merged' } else { 'individual' }
     try {
         $jobs = if ($Merged) {
@@ -277,7 +312,16 @@ function Get-RuntimeRequirements($Mod, $SmpProvider) {
         }
     }
 }
-function Get-DependencyPlan($Installed, $Selected, [switch]$Merged) {
+function Get-DependencyPlan($Installed, $Selected, [switch]$Merged, [string]$Game) {
+    if ($Game -ne 'Skyrim Special Edition') {
+        $label = if ($Game) { $Game } else { 'the undetected game' }
+        return [pscustomobject]@{
+            Mods = @($Selected)
+            Added = @()
+            Requirements = @()
+            Notes = @("Review dependencies manually for $label.")
+        }
+    }
     $byMod = @{}
     $providers = @{}
     $gameMasters = $BaseGameMasters + '_ResourcePack.esl'
@@ -381,8 +425,9 @@ function Assert-ImportName([string]$Name) {
 function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName) {
     Assert-ImportName $SeparatorName
     Assert-ImportName $ProfileName
-    $profile = Join-Path (Join-Path $Target 'profiles') $ProfileName
-    $mods = Join-Path $Target 'mods'
+    $layout = Get-Mo2Layout $Target
+    $profile = Join-Path $layout.Profiles $ProfileName
+    $mods = $layout.Mods
     foreach ($path in $Package, $profile, $mods) { Assert-OrdinaryPath $path }
     $manifestPath = Join-Path $Package 'section.json'
     $profilePath = Join-Path $profile 'modlist.txt'
@@ -391,6 +436,9 @@ function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged' -or !@($manifest.mods).Count) {
         throw 'Choose an export folder with a supported section.json.'
+    }
+    if ($manifest.game -and $layout.Game -and $manifest.game -ine $layout.Game) {
+        throw "This bundle is for $($manifest.game). The destination MO2 instance manages $($layout.Game)."
     }
     $separator = $SeparatorName + '_separator'
     $jobs = @(if ($manifest.format -eq 'merged') {
@@ -700,9 +748,11 @@ function Select-Folder($Description) {
 }
 
 function Add-Install($Path) {
-    if ((Test-Path -LiteralPath (Join-Path $Path 'ModOrganizer.ini')) -and
-        (Test-Path -LiteralPath (Join-Path $Path 'mods') -PathType Container) -and
-        (Test-Path -LiteralPath (Join-Path $Path 'profiles') -PathType Container)) {
+    if (!(Test-Path -LiteralPath (Join-Path $Path 'ModOrganizer.ini') -PathType Leaf)) { return }
+    try { $layout = Get-Mo2Layout $Path } catch { return }
+    if (
+        (Test-Path -LiteralPath $layout.Mods -PathType Container) -and
+        (Test-Path -LiteralPath $layout.Profiles -PathType Container)) {
         if (!$install.Items.Contains($Path)) { $null = $install.Items.Add($Path) }
     }
 }
@@ -713,7 +763,9 @@ $install.Add_SelectedIndexChanged({
     $separator.Items.Clear()
     $script:sectionMods = @(); $script:selectedNames.Clear(); Refresh-ModList
     $root = [string]$install.SelectedItem
-    foreach ($dir in Get-ChildItem -LiteralPath (Join-Path $root 'profiles') -Directory) {
+    $game = (Get-Mo2Layout $root).Game
+    $subtitle.Text = if ($game) { "Managed game: $game" } else { "Managed game: Unknown" }
+    foreach ($dir in Get-ChildItem -LiteralPath (Get-Mo2Layout $root).Profiles -Directory) {
         if (Test-Path -LiteralPath (Join-Path $dir.FullName 'modlist.txt')) { $null = $profile.Items.Add($dir.Name) }
     }
     if ($profile.Items.Count) {
@@ -727,8 +779,10 @@ $profile.Add_SelectedIndexChanged({
     $separator.Items.Clear()
     $script:sectionMods = @(); $script:selectedNames.Clear(); Refresh-ModList
     $root = [string]$install.SelectedItem
-    $directory = Join-Path (Join-Path $root 'profiles') ([string]$profile.SelectedItem)
-    $script:sections = @(Get-Sections $directory (Join-Path $root 'mods'))
+    $game = (Get-Mo2Layout $root).Game
+    $subtitle.Text = if ($game) { "Managed game: $game" } else { "Managed game: Unknown" }
+    $directory = Join-Path (Get-Mo2Layout $root).Profiles ([string]$profile.SelectedItem)
+    $script:sections = @(Get-Sections $directory (Get-Mo2Layout $root).Mods)
     foreach ($section in $script:sections) { $null = $separator.Items.Add($section.Name) }
     if ($separator.Items.Count) { $separator.SelectedIndex = 0 }
 })
@@ -750,7 +804,7 @@ $browse.Add_Click({
     Add-Install $path
     $index = $install.Items.IndexOf($path)
     if ($index -ge 0) { $install.SelectedIndex = $index }
-    else { [void][Windows.Forms.MessageBox]::Show($form, 'This folder does not contain a standard portable MO2 installation.', $form.Text) }
+    else { [void][Windows.Forms.MessageBox]::Show($form, 'This folder does not contain a usable MO2 instance.', $form.Text) }
 })
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 150
@@ -965,10 +1019,10 @@ $export.Add_Click({
     try {
         $allMods = @($script:sections | ForEach-Object { $_.Mods })
         $null = $worker.AddScript({
-            param($ScriptPath, $Installed, $Selected, $Merged)
+            param($ScriptPath, $Installed, $Selected, $Merged, $Game)
             . $ScriptPath -CoreOnly
-            Get-DependencyPlan $Installed $Selected -Merged:$Merged
-        }).AddArgument($scriptFile).AddArgument($allMods).AddArgument($selected).AddArgument($format.SelectedIndex -eq 1)
+            Get-DependencyPlan $Installed $Selected -Merged:$Merged -Game $Game
+        }).AddArgument($scriptFile).AddArgument($allMods).AddArgument($selected).AddArgument($format.SelectedIndex -eq 1).AddArgument((Get-Mo2Layout ([string]$install.SelectedItem)).Game)
         $script:job = @{
             Kind = 'Scan'; Worker = $worker; Handle = $worker.BeginInvoke()
             Section = $section; Selected = $selected
@@ -1011,7 +1065,7 @@ function Show-ImportWindow {
     $null = Add-Field Label 'Export folder containing section.json and ZIPs' 26 78 688 24
     $package = Add-Field TextBox '' 26 105 565 30
     $packageButton = Add-Field Button 'Browse...' 608 102 105 33
-    $null = Add-Field Label 'Destination MO2 installation' 26 149 688 24
+    $null = Add-Field Label 'Destination MO2 instance' 26 149 688 24
     $target = Add-Field ComboBox '' 26 175 565 30
     $target.DropDownStyle = 'DropDownList'
     $targetButton = Add-Field Button 'Browse...' 608 172 105 33
@@ -1032,7 +1086,9 @@ function Show-ImportWindow {
     $target.Add_SelectedIndexChanged({
         $targetProfile.Items.Clear()
         if (!$target.SelectedItem) { return }
-        foreach ($dir in Get-ChildItem -LiteralPath (Join-Path ([string]$target.SelectedItem) 'profiles') -Directory) {
+        $game = (Get-Mo2Layout ([string]$target.SelectedItem)).Game
+        $statusImport.Text = if ($game) { "Destination game: $game" } else { "Destination game: Unknown" }
+        foreach ($dir in Get-ChildItem -LiteralPath (Get-Mo2Layout ([string]$target.SelectedItem)).Profiles -Directory) {
             if (Test-Path -LiteralPath (Join-Path $dir.FullName 'modlist.txt')) { $null = $targetProfile.Items.Add($dir.Name) }
         }
         if ($targetProfile.Items.Count) { $targetProfile.SelectedIndex = 0 }
@@ -1041,7 +1097,7 @@ function Show-ImportWindow {
         $path = Pick-ImportFolder
         if (!$path) { return }
         Add-Install $path
-        if (!$install.Items.Contains($path)) { $statusImport.Text = 'No portable MO2 installation found in that folder.'; return }
+        if (!$install.Items.Contains($path)) { $statusImport.Text = 'No MO2 instance found in that folder.'; return }
         if (!$target.Items.Contains($path)) { $null = $target.Items.Add($path) }
         $target.SelectedItem = $path
     })
@@ -1053,7 +1109,8 @@ function Show-ImportWindow {
             if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged') { throw 'Unsupported export folder.' }
             $package.Text = $path
             $newSeparator.Text = $manifest.section
-            $statusImport.Text = if ($manifest.format -eq 'merged') { 'Bundle contains one merged mod.' } else { "Bundle contains $(@($manifest.mods).Count) separate mods." }
+            $bundleGame = if ($manifest.game) { $manifest.game } else { 'Unknown' }
+            $statusImport.Text = if ($manifest.format -eq 'merged') { "Bundle game: $bundleGame. Contains one merged mod." } else { "Bundle game: $bundleGame. Contains $(@($manifest.mods).Count) separate mods." }
         } catch { $statusImport.Text = $_.Exception.Message }
     })
     if ($target.Items.Count) { $target.SelectedIndex = 0 }
@@ -1135,6 +1192,8 @@ foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
         foreach ($child in Get-ChildItem -LiteralPath $directory -Directory -ErrorAction SilentlyContinue) { Add-Install $child.FullName }
     }
 }
+$globalInstances = Join-Path $env:USERPROFILE 'AppData\Local\ModOrganizer'
+foreach ($child in Get-ChildItem -LiteralPath $globalInstances -Directory -ErrorAction SilentlyContinue) { Add-Install $child.FullName }
 if ($install.Items.Count) { $install.SelectedIndex = 0 }
 while ($true) {
     $workflow = Select-Workflow
