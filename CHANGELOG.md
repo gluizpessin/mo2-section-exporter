@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Preview the destination profile, separator, mods, estimated extraction size, free space, and name collisions before importing.
+- Record SHA-256 checksums in new exports and verify them on import. Older bundles remain importable without stored checksums.
+
 ## 0.1.2
 
 - Add a startup language selector with ten languages. The default follows the Windows display language, with English as the fallback.
