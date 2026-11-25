@@ -1,5 +1,6 @@
 param([switch]$CoreOnly)
 $ErrorActionPreference = 'Stop'
+$AppVersion = '0.1.1'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -49,7 +50,7 @@ function Test-BaseGameFile($RelativePath) {
         $RelativePath -ieq '_ResourcePack.esl'
 }
 
-function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $Report, [switch]$Merged) {
+function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $Report, [switch]$Merged, [Threading.CancellationToken]$Cancellation = [Threading.CancellationToken]::None) {
     $Source = (Get-Item -LiteralPath $Source).FullName
     $Destination = (Get-Item -LiteralPath $Destination).FullName
     Assert-OrdinaryPath $Destination
@@ -60,6 +61,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
     $paths = @{}
     [long]$inputBytes = 0
     foreach ($mod in $Selected) {
+        $Cancellation.ThrowIfCancellationRequested()
         Assert-OrdinaryPath $mod.Path
         $children = @(Get-ChildItem -LiteralPath $mod.Path -Force -Recurse)
         if ($children | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -First 1) {
@@ -97,6 +99,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
         $jobs = if ($Merged) {
             $winningFiles = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
             foreach ($mod in $Selected) {
+        $Cancellation.ThrowIfCancellationRequested()
                 $manifest.mods += [ordered]@{ name = $mod.Name; enabled = $mod.Enabled }
                 foreach ($file in $paths[$mod.Name]) {
                     $relative = $file.FullName.Substring($mod.Path.Length + 1).Replace('\', '/')
@@ -116,6 +119,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
             [pscustomobject]@{ Name = $Section; Archive = $manifest.archive; Files = $winningFiles.Values }
         } else {
             foreach ($mod in $Selected) {
+        $Cancellation.ThrowIfCancellationRequested()
                 $filename = $mod.Name + '.zip'
                 $manifest.mods += [ordered]@{ name = $mod.Name; archive = $filename; enabled = $mod.Enabled }
                 $entries = foreach ($file in $paths[$mod.Name]) {
@@ -126,6 +130,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
         }
         [long]$totalWork = 0
         foreach ($job in $jobs) {
+            $Cancellation.ThrowIfCancellationRequested()
             $totalWork += 2 * [long](($job.Files | ForEach-Object { $_.File.Length } | Measure-Object -Sum).Sum)
         }
         [long]$processed = 0
@@ -133,6 +138,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
         [long]$lastUpdate = -200
         & $Report ('#progress|0|{0}' -f $totalWork)
         foreach ($job in $jobs) {
+            $Cancellation.ThrowIfCancellationRequested()
             & $Report "Compressing $($job.Name)"
             $filename = $job.Archive
             $partial = Join-Path $folder ($filename + '.partial')
@@ -151,6 +157,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
                             $hash = [Security.Cryptography.SHA256]::Create()
                             try {
                                 while (($read = $original.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                                    $Cancellation.ThrowIfCancellationRequested()
                                     $stream.Write($buffer, 0, $read)
                                     $processed += $read
                                     if ($clock.ElapsedMilliseconds - $lastUpdate -ge 200) {
@@ -176,6 +183,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
                         $hash = [Security.Cryptography.SHA256]::Create()
                         try {
                             while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                                $Cancellation.ThrowIfCancellationRequested()
                                 $null = $hash.TransformBlock($buffer, 0, $read, $buffer, 0)
                                 $processed += $read
                                 if ($clock.ElapsedMilliseconds - $lastUpdate -ge 200) {
@@ -192,11 +200,13 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
             } finally { $archive.Dispose() }
             [IO.File]::Move($partial, (Join-Path $folder $filename))
         }
+        $Cancellation.ThrowIfCancellationRequested()
         $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $folder 'section.json') -Encoding UTF8
         & $Report ('#progress|{0}|{0}' -f $processed)
     } catch {
         $partialFiles = Get-ChildItem -LiteralPath $folder -File -Filter '*.partial'
         foreach ($file in $partialFiles) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
+        if ($Cancellation.IsCancellationRequested) { throw [OperationCanceledException]::new("Export canceled. Any verified ZIPs are in $folder.") }
         throw "Export incomplete. Any verified ZIPs are in $folder. $($_.Exception.Message)"
     }
     $folder
@@ -504,12 +514,12 @@ Add-Type -AssemblyName System.Drawing
 
 $form = New-Object Windows.Forms.Form
 $form.Text = 'MO2 Section Exporter'
-$form.ClientSize = New-Object Drawing.Size(820, 778)
+$form.ClientSize = New-Object Drawing.Size(820, 807)
 $form.BackColor = [Drawing.ColorTranslator]::FromHtml('#F3F6FA')
 $form.ForeColor = [Drawing.ColorTranslator]::FromHtml('#17243A')
 $form.Font = New-Object Drawing.Font('Segoe UI', 10)
-$form.FormBorderStyle = 'FixedDialog'
-$form.MaximizeBox = $false
+$form.FormBorderStyle = 'Sizable'
+$form.MaximizeBox = $true
 $form.MinimumSize = $form.Size
 $form.StartPosition = 'CenterScreen'
 
@@ -576,12 +586,12 @@ $format.DropDownStyle = 'DropDownList'
 $null = $format.Items.Add('Individual ZIPs')
 $null = $format.Items.Add('Single merged ZIP')
 $format.SelectedIndex = 0
-$formatHelp = Add-Control Label '' 26 615 555 24
+$formatHelp = Add-Control Label '' 26 639 555 24
 $formatHelp.ForeColor = $muted
 $format.Add_SelectedIndexChanged({
     $formatHelp.Text = if ($format.SelectedIndex -eq 1) { 'Higher-priority selected mods win file conflicts. Plugin order is unchanged.' } else { '' }
 })
-$status = Add-Control Label 'Choose an installed MO2 modlist.' 26 650 540 46
+$status = Add-Control Label 'Choose an installed MO2 modlist.' 26 663 540 40
 $status.ForeColor = $muted
 $progress = Add-Control ProgressBar '' 26 704 768 13
 $progress.Style = 'Continuous'
@@ -589,6 +599,12 @@ $progress.Maximum = 100
 $progress.Visible = $false
 $metrics = Add-Control Label '' 26 725 768 28
 $metrics.ForeColor = $muted
+$versionLabel = Add-Control Label "v$AppVersion" 26 772 120 24
+$versionLabel.ForeColor = $muted
+$reviewToggle = Add-Control CheckBox 'Review dependencies before export' 26 612 420 26
+$reviewToggle.Checked = $true
+$cancelExport = Add-Control Button 'Cancel export' 606 646 188 46
+$cancelExport.Visible = $false
 $export = Add-Control Button 'Review selection' 606 646 188 46
 $export.Font = New-Object Drawing.Font('Segoe UI', 11, [Drawing.FontStyle]::Bold)
 $export.Enabled = $false
@@ -606,6 +622,25 @@ foreach ($button in $browse, $all, $none, $export) {
 $export.BackColor = $accent
 $export.ForeColor = [Drawing.Color]::White
 
+$reviewToggle.Add_CheckedChanged({
+    $export.Text = if ($reviewToggle.Checked) { 'Review selection' } else { 'Export ZIPs...' }
+})
+foreach ($control in $install,$search,$separator) { $control.Anchor = 'Top,Left,Right' }
+foreach ($control in $theme,$browse,$all,$none) { $control.Anchor = 'Top,Right' }
+foreach ($control in $form.Controls) {
+    if ($control.Top -ge 575) { $control.Anchor = 'Bottom,Left' }
+}
+$checks.Anchor = 'Top,Bottom,Left,Right'
+foreach ($control in $progress,$status,$metrics,$formatHelp) { $control.Anchor = 'Bottom,Left,Right' }
+$export.Anchor = 'Bottom,Right'
+$cancelExport.Anchor = 'Bottom,Right'
+$cancelExport.Add_Click({
+    if ($script:job -and $script:job.Cancellation) {
+        $script:job.Cancellation.Cancel()
+        $cancelExport.Enabled = $false
+        $status.Text = 'Canceling export...'
+    }
+})
 $script:darkMode = $false
 $theme.Add_Click({
     $script:darkMode = !$script:darkMode
@@ -621,8 +656,8 @@ $theme.Add_Click({
     $script:muted = $colors[3]
     $script:accent = $colors[4]
     $script:stepBackground = $colors[5]
-    foreach ($control in $subtitle, $formatHelp, $status, $metrics) { $control.ForeColor = $muted }
-    foreach ($control in $install, $profile, $separator, $checks, $format, $search, $browse, $all, $none, $theme) {
+    foreach ($control in $subtitle, $formatHelp, $status, $metrics, $versionLabel) { $control.ForeColor = $muted }
+    foreach ($control in $install, $profile, $separator, $checks, $format, $search, $browse, $all, $none, $theme, $cancelExport) {
         $control.ForeColor = $form.ForeColor
         $control.BackColor = $surface
     }
@@ -756,7 +791,7 @@ $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 150
 $script:job = $null
 $scriptFile = $PSCommandPath
-$controls = @($install, $browse, $profile, $separator, $checks, $export, $all, $none, $format, $search)
+$controls = @($install, $browse, $profile, $separator, $checks, $export, $all, $none, $format, $search, $reviewToggle)
 $form.Add_FormClosing({
     param($sender, $eventArgs)
     if ($script:job) {
@@ -817,10 +852,17 @@ $timer.Add_Tick({
         [void][Windows.Forms.MessageBox]::Show($form, "Export complete.$([Environment]::NewLine)$result", $form.Text)
     } catch {
         Set-GuidedStep 0
-        $status.Text = 'Export stopped.'
-        $metrics.Text = 'Export incomplete  |  ' + $metrics.Text
-        [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, $form.Text)
+        $status.Text = if ($job.Cancellation.IsCancellationRequested) { 'Export canceled. Your selection is ready to edit.' } else { 'Export stopped.' }
+        if ($job.Cancellation.IsCancellationRequested) {
+            $metrics.Text = $_.Exception.Message
+        } else {
+            $metrics.Text = 'Export incomplete  |  ' + $metrics.Text
+            [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, $form.Text)
+        }
     } finally {
+        $job.Cancellation.Dispose()
+        $cancelExport.Visible = $false
+        $export.Visible = $true
         $job.Worker.Dispose()
         $script:job = $null
         foreach ($control in $controls) { $control.Enabled = $true }
@@ -828,20 +870,24 @@ $timer.Add_Tick({
     }
 })
 function Start-Export($destination, $section, $selected) {
+    $cancellation = [Threading.CancellationTokenSource]::new()
     $queue = [Collections.Concurrent.ConcurrentQueue[string]]::new()
     $worker = [PowerShell]::Create()
     try {
         $null = $worker.AddScript({
-            param($ScriptPath, $Source, $Destination, $Section, $Selected, $Profile, $Queue, $Merged)
+            param($ScriptPath, $Source, $Destination, $Section, $Selected, $Profile, $Queue, $Merged, $Cancellation)
             . $ScriptPath -CoreOnly
             Export-Section $Source $Destination $Section $Selected $Profile {
                 param($message)
                 $Queue.Enqueue($message)
-            } -Merged:$Merged
+            } -Merged:$Merged -Cancellation:$Cancellation
         }).AddArgument($scriptFile).AddArgument([string]$install.SelectedItem).AddArgument($destination).
-            AddArgument($section.Name).AddArgument($selected).AddArgument([string]$profile.SelectedItem).AddArgument($queue).AddArgument($format.SelectedIndex -eq 1)
-        $script:job = @{ Worker = $worker; Queue = $queue; Clock = [Diagnostics.Stopwatch]::StartNew(); Bytes = [long]0; Total = [long]0; Handle = $worker.BeginInvoke(); Count = $(if ($format.SelectedIndex -eq 1) { 1 } else { $selected.Count }) }
+            AddArgument($section.Name).AddArgument($selected).AddArgument([string]$profile.SelectedItem).AddArgument($queue).AddArgument($format.SelectedIndex -eq 1).AddArgument($cancellation.Token)
+        $script:job = @{ Worker = $worker; Cancellation = $cancellation; Queue = $queue; Clock = [Diagnostics.Stopwatch]::StartNew(); Bytes = [long]0; Total = [long]0; Handle = $worker.BeginInvoke(); Count = $(if ($format.SelectedIndex -eq 1) { 1 } else { $selected.Count }) }
         foreach ($control in $controls) { $control.Enabled = $false }
+        $export.Visible = $false
+        $cancelExport.Enabled = $true
+        $cancelExport.Visible = $true
         Set-GuidedStep 2
         $status.Text = 'Checking selected mod files...'
         $progress.Value = 0
@@ -858,8 +904,9 @@ function Show-DependencyReview($plan, $selected, $section) {
     $review = New-Object Windows.Forms.Form
     $review.Text = 'MO2 Section Exporter'
     $review.ClientSize = New-Object Drawing.Size(820, 650)
-    $review.FormBorderStyle = 'FixedDialog'
-    $review.MaximizeBox = $false
+    $review.FormBorderStyle = 'Sizable'
+    $review.MaximizeBox = $true
+    $review.MinimumSize = $review.Size
     $review.MinimizeBox = $false
     $review.StartPosition = 'CenterParent'
     $review.Font = $form.Font
@@ -925,13 +972,22 @@ function Show-DependencyReview($plan, $selected, $section) {
     $include.Checked = $plan.Added.Count -gt 0
     $include.Enabled = $include.Checked
 
-    $back = Add-ReviewControl Button 'Back' 26 602 106 34
+    $back = Add-ReviewControl Button 'Cancel' 26 602 106 34
     $back.DialogResult = 'Cancel'
     $next = Add-ReviewControl Button 'Choose destination...' 606 601 188 38
     $next.DialogResult = 'OK'
     $next.FlatStyle = 'Flat'
     $next.BackColor = $accent
     $next.ForeColor = [Drawing.Color]::White
+    $reviewVersion = Add-ReviewControl Label "v$AppVersion" 350 607 120 24
+    $reviewVersion.ForeColor = $muted
+    foreach ($control in $review.Controls) {
+        if ($control.Top -ge 459) { $control.Anchor = 'Bottom,Left' }
+    }
+    $selectedList.Anchor = 'Top,Left,Right'
+    $notes.Anchor = 'Bottom,Left,Right'
+    $grid.Anchor = 'Top,Bottom,Left,Right'
+    $next.Anchor = 'Bottom,Right'
     $review.CancelButton = $back
     $review.AcceptButton = $next
 
@@ -961,6 +1017,11 @@ $export.Add_Click({
     $section = $script:sections[$separator.SelectedIndex]
     $selected = @($script:sectionMods | Where-Object { $script:selectedNames.Contains($_.Name) })
 
+    if (!$reviewToggle.Checked) {
+        $destination = Select-Folder 'Choose a destination outside the source modlist.'
+        if ($destination) { Start-Export $destination $section $selected }
+        return
+    }
     $worker = [PowerShell]::Create()
     try {
         $allMods = @($script:sections | ForEach-Object { $_.Mods })
@@ -1028,6 +1089,15 @@ function Show-ImportWindow {
     $go.FlatStyle = 'Flat'
     $go.BackColor = $accent
     $go.ForeColor = [Drawing.Color]::White
+    $w.FormBorderStyle = 'Sizable'
+    $w.MinimumSize = $w.Size
+    $importVersion = Add-Field Label "v$AppVersion" 150 405 115 23
+    $importVersion.ForeColor = $muted
+    foreach ($control in $package,$target,$statusImport,$newSeparator) { $control.Anchor = 'Top,Left,Right' }
+    foreach ($control in $packageButton,$targetButton) { $control.Anchor = 'Top,Right' }
+    $back.Anchor = 'Bottom,Left'
+    $go.Anchor = 'Bottom,Right'
+    $importVersion.Anchor = 'Bottom,Left'
     $back.Add_Click({ $w.Close() })
     $target.Add_SelectedIndexChanged({
         $targetProfile.Items.Clear()
@@ -1106,9 +1176,10 @@ function Show-ImportWindow {
 function Select-Workflow {
     $welcome = New-Object Windows.Forms.Form
     $welcome.Text = 'MO2 Section Exporter'
-    $welcome.ClientSize = New-Object Drawing.Size(640, 245)
+    $welcome.ClientSize = New-Object Drawing.Size(640, 338)
     $welcome.StartPosition = 'CenterScreen'
     $welcome.Font = $form.Font
+    $welcome.MinimumSize = $welcome.Size
     $welcome.BackColor = $form.BackColor
     $heading = New-Object Windows.Forms.Label
     $heading.Text = 'What would you like to do?'
@@ -1124,9 +1195,136 @@ function Select-Workflow {
         $button.FlatStyle = 'Flat'
         $button.BackColor = $surface
         $button.ForeColor = $accent
+        $button.Anchor = if ($action.X -eq 26) { 'Top,Left' } else { 'Top,Right' }
         $welcome.Controls.Add($button)
     }
-    try { $welcome.ShowDialog() } finally { $welcome.Dispose() }
+    $welcomeVersion = New-Object Windows.Forms.Label
+    $welcomeVersion.Text = "v$AppVersion"
+    $welcomeVersion.ForeColor = $muted
+    $welcomeVersion.SetBounds(26, 300, 125, 24)
+    $welcomeVersion.Anchor = 'Bottom,Left'
+    $welcome.Controls.Add($welcomeVersion)
+    $updateStatus = New-Object Windows.Forms.Label
+    $updateStatus.SetBounds(26, 211, 585, 36)
+    $updateStatus.ForeColor = $muted
+    $welcome.Controls.Add($updateStatus)
+    $updateButton = New-Object Windows.Forms.Button
+    $updateButton.Text = 'Update and open'
+    $updateButton.SetBounds(26, 252, 150, 32)
+    $updateButton.Visible = $false
+    $welcome.Controls.Add($updateButton)
+    $hideUpdate = New-Object Windows.Forms.Button
+    $hideUpdate.Text = 'Hide'
+    $hideUpdate.SetBounds(189, 252, 85, 32)
+    $hideUpdate.Visible = $false
+    $welcome.Controls.Add($hideUpdate)
+    $update = @{ Worker = $null; Handle = $null; Offer = $null; Downloading = $false }
+    $updateTimer = New-Object Windows.Forms.Timer
+    $updateTimer.Interval = 180
+    $hideUpdate.Add_Click({
+        $updateStatus.Text = ''
+        $updateButton.Visible = $false
+        $hideUpdate.Visible = $false
+    })
+    $updateTimer.Add_Tick({
+        if (!$update.Handle.IsCompleted) { return }
+        $updateTimer.Stop()
+        try {
+            $result = $update.Worker.EndInvoke($update.Handle)
+            if ($update.Worker.HadErrors) { throw $update.Worker.Streams.Error[0] }
+            if ($update.Downloading) {
+                $downloaded = [string]$result[0]
+                Start-Process -FilePath $downloaded -WindowStyle Hidden -ErrorAction Stop
+                $update.Downloading = $false
+                $welcome.Close()
+            } elseif ($result.Count) {
+                $update.Offer = $result[0]
+                $updateStatus.Text = "Version $($update.Offer.Version) is available. Update now or keep using v$AppVersion."
+                $updateButton.Visible = $true
+                $hideUpdate.Visible = $true
+            }
+        } catch {
+            if ($update.Downloading) {
+                $updateStatus.Text = "Update download failed. $($_.Exception.Message)"
+                $updateButton.Enabled = $true
+                $hideUpdate.Enabled = $true
+            }
+        } finally {
+            $update.Worker.Dispose()
+            $update.Worker = $null
+            $update.Handle = $null
+        }
+    })
+    $updateButton.Add_Click({
+        if ($update.Worker -or !$update.Offer) { return }
+        $update.Downloading = $true
+        $updateButton.Enabled = $false
+        $hideUpdate.Enabled = $false
+        $updateStatus.Text = 'Downloading and verifying the update...'
+        $update.Worker = [PowerShell]::Create()
+        $null = $update.Worker.AddScript({
+            param($Url, $Hash, $Name, $RunningExe)
+            $ErrorActionPreference = 'Stop'
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $path = Join-Path ([IO.Path]::GetDirectoryName($RunningExe)) $Name
+            if (Test-Path -LiteralPath $path) {
+                if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ieq $Hash) { return $path }
+                throw 'An executable with a different checksum already exists at the update path.'
+            }
+            $temp = $path + '.' + [guid]::NewGuid().ToString('N') + '.partial'
+            try {
+                Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 45 -OutFile $temp
+                if ((Get-FileHash -LiteralPath $temp -Algorithm SHA256).Hash -ine $Hash) {
+                    throw 'The download checksum did not match the GitHub release.'
+                }
+                [IO.File]::Move($temp, $path)
+                $path
+            } finally {
+                if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
+            }
+        }).AddArgument($update.Offer.Url).AddArgument($update.Offer.Hash).AddArgument($update.Offer.Name).AddArgument($env:MO2_EXPORTER_EXE_PATH)
+        $update.Handle = $update.Worker.BeginInvoke()
+        $updateTimer.Start()
+    })
+    $welcome.Add_Shown({
+        if (!$env:MO2_EXPORTER_EXE_PATH) { return }
+        $update.Worker = [PowerShell]::Create()
+        $null = $update.Worker.AddScript({
+            param($Current)
+            $ErrorActionPreference = 'Stop'
+            $ProgressPreference = 'SilentlyContinue'
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $api = 'https://api.github.com/repos/gluizpessin/mo2-section-exporter/releases'
+            $releases = Invoke-RestMethod -Uri $api -UserAgent 'MO2-Section-Exporter' -TimeoutSec 8
+            $offers = foreach ($release in $releases) {
+                if ($release.draft -or $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') { continue }
+                $version = [version]$Matches[1]
+                if ($version -le [version]$Current) { continue }
+                $name = "MO2-Section-Exporter-v$version.exe"
+                $url = "https://github.com/gluizpessin/mo2-section-exporter/releases/download/v$version/$name"
+                foreach ($asset in $release.assets) {
+                    if ($asset.name -ceq $name -and $asset.browser_download_url -ceq $url -and $asset.digest -match '^sha256:([0-9a-f]{64})$') {
+                        [pscustomobject]@{ Version = $version; Name = $name; Url = $url; Hash = $Matches[1] }
+                    }
+                }
+            }
+            $offers | Sort-Object Version -Descending | Select-Object -First 1
+        }).AddArgument($AppVersion)
+        $update.Handle = $update.Worker.BeginInvoke()
+        $updateTimer.Start()
+    })
+    $welcome.Add_FormClosing({
+        param($sender, $eventArgs)
+        if ($update.Downloading -and $update.Worker) { $eventArgs.Cancel = $true }
+    })
+    try { $welcome.ShowDialog() } finally {
+        $updateTimer.Dispose()
+        if ($update.Worker) {
+            $pending = $update.Worker
+            $null = $pending.BeginStop($null, $null)
+        }
+        $welcome.Dispose()
+    }
 }
 
 foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
