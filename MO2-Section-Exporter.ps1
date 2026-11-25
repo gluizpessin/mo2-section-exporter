@@ -1,6 +1,6 @@
 param([switch]$CoreOnly)
 $ErrorActionPreference = 'Stop'
-$AppVersion = '0.1.1'
+$AppVersion = '0.1.2'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -512,6 +512,68 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 
+$script:codes = @('en','zh','hi','es','ar','fr','bn','pt','ru','id')
+$script:windowsLanguage = [Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName
+if ($script:windowsLanguage -notin $script:codes) { $script:windowsLanguage = 'en' }
+$script:language = $script:windowsLanguage
+$script:languageChoice = 0
+$script:translations = @{}
+foreach ($line in ('What would you like to do?|??????|?? ???? ???? ????? ????|�Qu� quieres hacer?|???? ???? ?? ?????|Que souhaitez-vous faire ?|???? ?? ???? ????|O que voc� quer fazer?|??? ?? ?????? ????????|Apa yang ingin Anda lakukan?
+Import section|????|?????? ???? ????|Importar secci�n|??????? ???|Importer une section|????? ?????? ????|Importar se��o|?????? ???????|Impor bagian
+Export section|????|?????? ??????? ????|Exportar secci�n|????? ???|Exporter une section|????? ??????? ????|Exportar se��o|??????? ???????|Ekspor bagian
+Default export folder|???????|???????? ??????? ???????|Carpeta de exportaci�n predeterminada|???? ??????? ?????????|Dossier d''exportation par d�faut|?????? ??????? ???????|Pasta padr�o de exporta��o|????? ???????? ?? ?????????|Folder ekspor bawaan
+Change...|??...|?????...|Cambiar...|?????...|Modifier.|???????? ????...|Alterar.|????????.|Ubah...
+Dark mode|????|???? ???|Modo oscuro|????? ??????|Mode sombre|????? ???|Modo escuro|?????? ?????|Mode gelap
+Light mode|????|????? ???|Modo claro|????? ??????|Mode clair|???? ???|Modo claro|??????? ?????|Mode terang
+Browse...|??...|??????? ????...|Examinar.|???????...|Parcourir.|?????? ????...|Procurar.|?????.|Telusuri...
+Profile|????|?????????|Perfil|??? ???????|Profil|????????|Perfil|???????|Profil
+Separator|???|??????|Separador|??????|S�parateur|??????|Separador|???????????|Pemisah
+MO2 installation|MO2 ??|MO2 ??????????|Instalaci�n de MO2|????? MO2|Installation de MO2|MO2 ?????????|Instala��o do MO2|????????? MO2|Instalasi MO2
+Filter by mod name|???????|??? ??? ?? ??????|Filtrar por nombre|????? ??? ??? ?????|Filtrer par nom|???? ??? ????? ??????? ????|Filtrar por nome|?????? ?? ?????|Filter berdasarkan nama
+Select shown|?????|????? ?? ?????|Seleccionar visibles|????? ??????|S�lectionner les �l�ments visibles|???????????? ???????? ????|Selecionar vis�veis|??????? ???????|Pilih yang terlihat
+Clear shown|?????|????? ?? ?????|Deseleccionar visibles|????? ????? ??????|D�s�lectionner les �l�ments visibles|????????????? ???????? ????|Desmarcar vis�veis|????? ????? ???????|Hapus pilihan terlihat
+Export format|????|??????? ???????|Formato de exportaci�n|???? ???????|Format d''exportation|??????? ???????|Formato de exporta��o|?????? ????????|Format ekspor
+Individual ZIPs|?? ZIP|???-??? ZIP|ZIP individuales|????? ZIP ??????|ZIP individuels|???? ZIP|ZIPs individuais|????????? ZIP|ZIP terpisah
+Single merged ZIP|???? ZIP|?? ??????? ZIP|Un ZIP combinado|??? ZIP ????|Un seul ZIP fusionn�|???? ???????? ZIP|Um ZIP mesclado|???? ???????????? ZIP|Satu ZIP gabungan
+Review dependencies before export|????????|??????? ?? ???? ?????????? ?????|Revisar dependencias antes de exportar|?????? ???????? ??? ???????|V�rifier les d�pendances avant l''exportation|???????? ??? ???????? ?????|Revisar depend�ncias antes de exportar|????????? ??????????? ????? ?????????|Tinjau dependensi sebelum ekspor
+Review selection|????|??? ?? ??????? ????|Revisar selecci�n|?????? ???????|V�rifier la s�lection|???????? ?????????? ????|Revisar sele��o|????????? ?????|Tinjau pilihan
+Export ZIPs...|?? ZIP...|ZIP ??????? ????...|Exportar ZIP.|????? ZIP...|Exporter les ZIP.|ZIP ??????? ????...|Exportar ZIPs.|??????? ZIP.|Ekspor ZIP...
+Cancel export|????|??????? ???? ????|Cancelar exportaci�n|????? ???????|Annuler l''exportation|??????? ????? ????|Cancelar exporta��o|???????? ???????|Batalkan ekspor
+Review dependencies|?????|?????????? ?????|Revisar dependencias|?????? ????????|V�rifier les d�pendances|???????? ?????|Revisar depend�ncias|????????? ???????????|Tinjau dependensi
+Compatibility notes|?????|?????? ??????????|Notas de compatibilidad|??????? ???????|Notes de compatibilit�|??????????? ???|Notas de compatibilidade|?????????? ? ?????????????|Catatan kompatibilitas
+Requirement|???|????????|Requisito|???????|D�pendance|?????????????|Requisito|???????????|Persyaratan
+Provided by|???|???????|Proporcionado por|?????|Fourni par|??????????|Fornecido por|?????????????|Disediakan oleh
+Required by mod|????????|?????? ???? ???|Mod que lo requiere|????? ???? ??????|Mod qui en d�pend|?? ??? ????????|Mod que exige|????????? ???|Mod yang memerlukan
+Status|??|??????|Estado|??????|�tat|??????|Status|??????|Status
+Cancel|??|???? ????|Cancelar|?????|Annuler|????? ????|Cancelar|??????|Batal
+Back|??|????|Atr�s|????|Retour|???? ???|Voltar|?????|Kembali
+Choose destination...|???????...|?????? ?????...|Elegir destino.|?????? ??????...|Choisir la destination.|??????? ???? ???...|Escolher destino.|??????? ?????.|Pilih tujuan...
+Import a saved section|????????|????? ??? ?????? ???? ????|Importar una secci�n guardada|??????? ??? ?????|Importer une section enregistr�e|???????? ????? ?????? ????|Importar se��o salva|?????? ???????????? ???????|Impor bagian tersimpan
+Export folder containing section.json and ZIPs|?? section.json ? ZIP ????|section.json ?? ZIP ???? ???????|Carpeta con section.json y los ZIP|???? ????? ??? section.json ?????? ZIP|Dossier contenant section.json et les ZIP|section.json ? ZIP ???? ???????|Pasta com section.json e os ZIPs|????? ? section.json ? ZIP|Folder berisi section.json dan ZIP
+Destination MO2 installation|?? MO2 ??|?????? MO2 ??????????|Instalaci�n de MO2 de destino|????? MO2 ??????|Installation MO2 de destination|??????? MO2 ?????????|Instala��o de destino do MO2|??????? ????????? MO2|Instalasi MO2 tujuan
+Destination profile|??????|?????? ?????????|Perfil de destino|??? ????? ??????|Profil de destination|??????? ????????|Perfil de destino|??????? ???????|Profil tujuan
+New separator name|??????|?? ?????? ?? ???|Nombre del nuevo separador|??? ?????? ??????|Nom du nouveau s�parateur|???? ???????? ???|Nome do novo separador|??? ?????? ???????????|Nama pemisah baru
+Update and open|?????|????? ???? ?? ?????|Actualizar y abrir|????? ????|Mettre � jour et ouvrir|????? ??? ?????|Atualizar e abrir|???????? ? ???????|Perbarui dan buka
+Hide|??|??????|Ocultar|?????|Masquer|?????|Ocultar|??????|Sembunyikan
+Language|??|????|Idioma|?????|Langue|????|Idioma|????|Bahasa
+Windows default|Windows ??|Windows ????????|Predeterminado de Windows|??????? Windows|Langue de Windows|Windows ??????|Padr�o do Windows|??? ? Windows|Bawaan Windows' -split '\r?\n')) {
+    $parts = $line.Split('|')
+    if ($parts.Count -ne 10) { throw 'Invalid translation row.' }
+    $script:translations[$parts[0]] = $parts
+}
+function Get-UiText([string]$text) {
+    $index = [array]::IndexOf($script:codes, $script:language)
+    if ($index -gt 0 -and $script:translations.ContainsKey($text)) { return $script:translations[$text][$index] }
+    $text
+}
+function Update-ControlLanguage($window) {
+    $window.RightToLeft = if ($script:language -eq 'ar') { 'Yes' } else { 'No' }
+    foreach ($control in $window.Controls) {
+        if ($control.Tag -is [string] -and $control.Tag) { $control.Text = Get-UiText $control.Tag }
+    }
+}
+
+
 $form = New-Object Windows.Forms.Form
 $form.Text = 'MO2 Section Exporter'
 $form.ClientSize = New-Object Drawing.Size(820, 807)
@@ -525,7 +587,8 @@ $form.StartPosition = 'CenterScreen'
 
 function Add-Control($Type, $Text, $X, $Y, $Width, $Height) {
     $control = New-Object "Windows.Forms.$Type"
-    $control.Text = $Text
+    $control.Tag = $Text
+    $control.Text = Get-UiText $Text
     $control.SetBounds($X, $Y, $Width, $Height)
     $form.Controls.Add($control)
     $control
@@ -623,7 +686,7 @@ $export.BackColor = $accent
 $export.ForeColor = [Drawing.Color]::White
 
 $reviewToggle.Add_CheckedChanged({
-    $export.Text = if ($reviewToggle.Checked) { 'Review selection' } else { 'Export ZIPs...' }
+    $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } else { Get-UiText 'Export ZIPs...' }
 })
 foreach ($control in $install,$search,$separator) { $control.Anchor = 'Top,Left,Right' }
 foreach ($control in $theme,$browse,$all,$none) { $control.Anchor = 'Top,Right' }
@@ -642,8 +705,8 @@ $cancelExport.Add_Click({
     }
 })
 $script:darkMode = $false
-$theme.Add_Click({
-    $script:darkMode = !$script:darkMode
+function Set-AppTheme([bool]$Dark) {
+    $script:darkMode = $Dark
     $palette = if ($script:darkMode) {
         @('#111826','#E8EFFA','#202C3F','#B9C8DB','#255CC1','#26344A')
     } else {
@@ -662,9 +725,19 @@ $theme.Add_Click({
         $control.BackColor = $surface
     }
     $export.BackColor = $accent
-    $theme.Text = if ($script:darkMode) { 'Light mode' } else { 'Dark mode' }
+    $theme.Text = if ($script:darkMode) { Get-UiText 'Light mode' } else { Get-UiText 'Dark mode' }
     Set-GuidedStep $script:currentStep
-})
+}
+function Switch-Theme { Set-AppTheme (!$script:darkMode) }
+
+function Get-WindowsAppDarkMode {
+    $personalize = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+    $value = (Get-ItemProperty -LiteralPath $personalize -Name AppsUseLightTheme -ErrorAction SilentlyContinue).AppsUseLightTheme
+    return ($null -ne $value -and $value -eq 0)
+}
+
+$theme.Add_Click({ Switch-Theme })
+Set-AppTheme (Get-WindowsAppDarkMode)
 $theme.FlatStyle = 'Flat'
 $theme.FlatAppearance.BorderSize = 0
 $theme.BackColor = $surface
@@ -726,6 +799,107 @@ $none.Add_Click({
     Refresh-ModList
 })
 Update-Selection
+
+$script:settingsKey = 'HKCU:\Software\MO2SectionExporter'
+$script:exportDestination = [string](Get-ItemProperty -LiteralPath $script:settingsKey -Name ExportDestination -ErrorAction SilentlyContinue).ExportDestination
+
+function Set-ExportDestination($Owner) {
+    if (!('Mo2Exporter.FolderPicker' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Mo2Exporter {
+    public static class FolderPicker {
+        [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+        private class OpenDialog {}
+        [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface Dialog {
+            [PreserveSig] int Show(IntPtr owner);
+            void SetFileTypes(uint count, IntPtr specs);
+            void SetFileTypeIndex(uint index);
+            void GetFileTypeIndex(out uint index);
+            void Advise(IntPtr events, out uint cookie);
+            void Unadvise(uint cookie);
+            void SetOptions(uint options);
+            void GetOptions(out uint options);
+            void SetDefaultFolder(Item folder);
+            void SetFolder(Item folder);
+            void GetFolder(out Item folder);
+            void GetCurrentSelection(out Item item);
+            void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+            void GetFileName(out IntPtr name);
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+            void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+            void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+            void GetResult(out Item item);
+        }
+        [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface Item {
+            void BindToHandler(IntPtr context, ref Guid handler, ref Guid iid, out IntPtr result);
+            void GetParent(out Item parent);
+            void GetDisplayName(uint form, out IntPtr name);
+        }
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        private static extern void SHCreateItemFromParsingName(string path, IntPtr context, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out Item item);
+
+        public static string Pick(IntPtr owner, string initialFolder) {
+            var dialog = (Dialog)new OpenDialog();
+            Item initial = null, selected = null;
+            try {
+                uint options;
+                dialog.GetOptions(out options);
+                dialog.SetOptions(options | 0x20 | 0x40 | 0x800); // PickFolders, ForceFileSystem, PathMustExist
+                dialog.SetTitle("Choose export destination");
+                if (System.IO.Directory.Exists(initialFolder)) {
+                    var iid = typeof(Item).GUID;
+                    SHCreateItemFromParsingName(initialFolder, IntPtr.Zero, ref iid, out initial);
+                    dialog.SetFolder(initial);
+                }
+                int result = dialog.Show(owner);
+                if (result == unchecked((int)0x800704C7)) return null;
+                Marshal.ThrowExceptionForHR(result);
+                dialog.GetResult(out selected);
+                IntPtr path;
+                selected.GetDisplayName(0x80058000, out path);
+                try { return Marshal.PtrToStringUni(path); }
+                finally { Marshal.FreeCoTaskMem(path); }
+            } finally {
+                if (selected != null) Marshal.ReleaseComObject(selected);
+                if (initial != null) Marshal.ReleaseComObject(initial);
+                Marshal.ReleaseComObject(dialog);
+            }
+        }
+    }
+}
+'@
+    }
+    $path = [Mo2Exporter.FolderPicker]::Pick($Owner.Handle, $script:exportDestination)
+    if (!$path) { return }
+    Assert-OrdinaryPath $path
+    $null = New-Item -Path $script:settingsKey -Force
+    Set-ItemProperty -LiteralPath $script:settingsKey -Name ExportDestination -Value $path
+    $script:exportDestination = $path
+}
+
+function Get-ExportDestination($Owner, $Source) {
+    try {
+        if ([IO.Directory]::Exists($script:exportDestination)) {
+            if (!(Test-Within $script:exportDestination $Source)) { return $script:exportDestination }
+            [void][Windows.Forms.MessageBox]::Show($Owner, 'Choose an export folder outside the source installation.', $Owner.Text)
+        }
+        $previous = $script:exportDestination
+        Set-ExportDestination $Owner
+        if ($script:exportDestination -ne $previous -and
+            !(Test-Within $script:exportDestination $Source)) { return $script:exportDestination }
+        if ($script:exportDestination -ne $previous) {
+            [void][Windows.Forms.MessageBox]::Show($Owner, 'The selected folder is inside the source installation. Change the export destination before continuing.', $Owner.Text)
+        }
+    } catch {
+        [void][Windows.Forms.MessageBox]::Show($Owner, $_.Exception.Message, $Owner.Text)
+    }
+}
+
 function Select-Folder($Description) {
     $dialog = New-Object Windows.Forms.FolderBrowserDialog
     $dialog.Description = $Description
@@ -902,6 +1076,7 @@ function Start-Export($destination, $section, $selected) {
 
 function Show-DependencyReview($plan, $selected, $section) {
     $review = New-Object Windows.Forms.Form
+    $review.RightToLeft = $form.RightToLeft
     $review.Text = 'MO2 Section Exporter'
     $review.ClientSize = New-Object Drawing.Size(820, 650)
     $review.FormBorderStyle = 'Sizable'
@@ -951,7 +1126,7 @@ function Show-DependencyReview($plan, $selected, $section) {
     $grid.DefaultCellStyle.WrapMode = 'True'
     $grid.AutoSizeRowsMode = 'AllCells'
     foreach ($column in 'Requirement', 'Provided by', 'Required by mod', 'Status') {
-        $null = $grid.Columns.Add($column, $column)
+        $null = $grid.Columns.Add($column, (Get-UiText $column))
     }
     $grid.Columns[3].FillWeight = 58
     foreach ($requirement in $plan.Requirements) {
@@ -1000,7 +1175,7 @@ function Show-DependencyReview($plan, $selected, $section) {
         $status.Text = 'Review canceled. Your mod selection is ready to edit.'
         return
     }
-    $destination = Select-Folder 'Choose a destination outside the source modlist.'
+    $destination = Get-ExportDestination $form ([string]$install.SelectedItem)
     if (!$destination) {
         Set-GuidedStep 0
         $status.Text = 'No destination selected. Review the selection to continue.'
@@ -1018,7 +1193,7 @@ $export.Add_Click({
     $selected = @($script:sectionMods | Where-Object { $script:selectedNames.Contains($_.Name) })
 
     if (!$reviewToggle.Checked) {
-        $destination = Select-Folder 'Choose a destination outside the source modlist.'
+        $destination = Get-ExportDestination $form ([string]$install.SelectedItem)
         if ($destination) { Start-Export $destination $section $selected }
         return
     }
@@ -1050,14 +1225,15 @@ $export.Add_Click({
 
 function Show-ImportWindow {
     $w = New-Object Windows.Forms.Form
-    $w.Text = 'Import section'
+    $w.RightToLeft = $form.RightToLeft
+    $w.Text = Get-UiText 'Import section'
     $w.ClientSize = New-Object Drawing.Size(740, 460)
     $w.StartPosition = 'CenterScreen'
     $w.Font = $form.Font
     $w.BackColor = $form.BackColor
     function Add-Field($type,$text,$x,$y,$width,$height) {
         $item = New-Object "Windows.Forms.$type"
-        $item.Text = $text
+        $item.Text = Get-UiText $text
         $item.SetBounds($x,$y,$width,$height)
         $w.Controls.Add($item)
         $item
@@ -1170,26 +1346,36 @@ function Show-ImportWindow {
             $importTimer.Start()
         } catch { $workerImport.Dispose(); $statusImport.Text = $_.Exception.Message }
     })
+    $w.ForeColor = $form.ForeColor
+    foreach ($field in $package,$target,$targetProfile,$newSeparator,$packageButton,$targetButton,$back) {
+        $field.BackColor = $surface
+        $field.ForeColor = $form.ForeColor
+    }
     try { [void]$w.ShowDialog() } finally { $importTimer.Dispose(); $w.Dispose() }
 }
 
 function Select-Workflow {
     $welcome = New-Object Windows.Forms.Form
     $welcome.Text = 'MO2 Section Exporter'
-    $welcome.ClientSize = New-Object Drawing.Size(640, 338)
+    $welcome.ClientSize = New-Object Drawing.Size(640, 452)
     $welcome.StartPosition = 'CenterScreen'
     $welcome.Font = $form.Font
     $welcome.MinimumSize = $welcome.Size
     $welcome.BackColor = $form.BackColor
     $heading = New-Object Windows.Forms.Label
-    $heading.Text = 'What would you like to do?'
+    $heading.Tag = 'What would you like to do?'
     $heading.Font = New-Object Drawing.Font('Segoe UI', 22, [Drawing.FontStyle]::Bold)
-    $heading.SetBounds(25, 22, 590, 50)
+    $heading.SetBounds(25, 22, 460, 50)
     $welcome.Controls.Add($heading)
+    $startupTheme = New-Object Windows.Forms.Button
+    $startupTheme.SetBounds(505, 27, 106, 34)
+    $startupTheme.Anchor = 'Top,Right'
+    $welcome.Controls.Add($startupTheme)
     $actions = @(@{Text='Import section';Result='Yes';X=26},@{Text='Export section';Result='No';X=326})
     foreach ($action in $actions) {
         $button = New-Object Windows.Forms.Button
-        $button.Text = $action.Text
+        $button.Tag = $action.Text
+        $button.Text = Get-UiText $action.Text
         $button.DialogResult = $action.Result
         $button.SetBounds($action.X, 103, 285, 91)
         $button.FlatStyle = 'Flat'
@@ -1201,21 +1387,45 @@ function Select-Workflow {
     $welcomeVersion = New-Object Windows.Forms.Label
     $welcomeVersion.Text = "v$AppVersion"
     $welcomeVersion.ForeColor = $muted
-    $welcomeVersion.SetBounds(26, 300, 125, 24)
+    $welcomeVersion.SetBounds(26, 414, 125, 24)
     $welcomeVersion.Anchor = 'Bottom,Left'
     $welcome.Controls.Add($welcomeVersion)
+
+    $destinationCaption = New-Object Windows.Forms.Label
+    $destinationCaption.Tag = 'Default export folder'
+    $destinationCaption.SetBounds(26, 205, 440, 23)
+    $welcome.Controls.Add($destinationCaption)
+    $savedFolder = New-Object Windows.Forms.TextBox
+    $savedFolder.ReadOnly = $true
+    $savedFolder.Text = $script:exportDestination
+    $savedFolder.SetBounds(26, 231, 465, 29)
+    $savedFolder.Anchor = 'Top,Left,Right'
+    $welcome.Controls.Add($savedFolder)
+    $changeFolder = New-Object Windows.Forms.Button
+    $changeFolder.Tag = 'Change...'
+    $changeFolder.SetBounds(505, 229, 106, 32)
+    $changeFolder.Anchor = 'Top,Right'
+    $welcome.Controls.Add($changeFolder)
+    $changeFolder.Add_Click({
+        try {
+            Set-ExportDestination $welcome
+            $savedFolder.Text = $script:exportDestination
+        } catch {
+            [void][Windows.Forms.MessageBox]::Show($welcome, $_.Exception.Message, $welcome.Text)
+        }
+    })
     $updateStatus = New-Object Windows.Forms.Label
-    $updateStatus.SetBounds(26, 211, 585, 36)
+    $updateStatus.SetBounds(26, 325, 585, 36)
     $updateStatus.ForeColor = $muted
     $welcome.Controls.Add($updateStatus)
     $updateButton = New-Object Windows.Forms.Button
-    $updateButton.Text = 'Update and open'
-    $updateButton.SetBounds(26, 252, 150, 32)
+    $updateButton.Tag = 'Update and open'
+    $updateButton.SetBounds(26, 366, 165, 32)
     $updateButton.Visible = $false
     $welcome.Controls.Add($updateButton)
     $hideUpdate = New-Object Windows.Forms.Button
-    $hideUpdate.Text = 'Hide'
-    $hideUpdate.SetBounds(189, 252, 85, 32)
+    $hideUpdate.Tag = 'Hide'
+    $hideUpdate.SetBounds(205, 366, 90, 32)
     $hideUpdate.Visible = $false
     $welcome.Controls.Add($hideUpdate)
     $update = @{ Worker = $null; Handle = $null; Offer = $null; Downloading = $false }
@@ -1286,6 +1496,41 @@ function Select-Workflow {
         $update.Handle = $update.Worker.BeginInvoke()
         $updateTimer.Start()
     })
+
+    $languageLabel = New-Object Windows.Forms.Label
+    $languageLabel.Tag = 'Language'
+    $languageLabel.SetBounds(26, 277, 140, 27)
+    $welcome.Controls.Add($languageLabel)
+    $languagePicker = New-Object Windows.Forms.ComboBox
+    $languagePicker.SetBounds(170, 273, 300, 30)
+    $languagePicker.DropDownStyle = 'DropDownList'
+    $languagePicker.AccessibleName = 'Language'
+    $languagePicker.Items.AddRange([object[]]@('Windows default','English','????','??????','Espa�ol','???????','Fran�ais','?????','Portugu�s','???????','Bahasa Indonesia'))
+    $languagePicker.SelectedIndex = $script:languageChoice
+    $languagePicker.Add_SelectedIndexChanged({
+        $script:languageChoice = $languagePicker.SelectedIndex
+        $script:language = if ($script:languageChoice -gt 0) { $script:codes[$script:languageChoice - 1] } else { $script:windowsLanguage }
+        Update-ControlLanguage $form
+        Update-ExportLanguage
+        Update-WelcomeTheme
+    })
+    $welcome.Controls.Add($languagePicker)
+    function Update-WelcomeTheme {
+        $welcome.BackColor = $form.BackColor
+        $welcome.ForeColor = $form.ForeColor
+        Update-ControlLanguage $welcome
+        $startupTheme.Text = $theme.Text
+        $welcomeVersion.ForeColor = $muted
+        $updateStatus.ForeColor = $muted
+        foreach ($control in $welcome.Controls) {
+            if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.TextBox]) {
+                $control.BackColor = $surface
+                $control.ForeColor = $form.ForeColor
+            }
+        }
+    }
+    $startupTheme.Add_Click({ Switch-Theme; Update-WelcomeTheme })
+    Update-WelcomeTheme
     $welcome.Add_Shown({
         if (!$env:MO2_EXPORTER_EXE_PATH) { return }
         $update.Worker = [PowerShell]::Create()
@@ -1333,6 +1578,21 @@ foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
         foreach ($child in Get-ChildItem -LiteralPath $directory -Directory -ErrorAction SilentlyContinue) { Add-Install $child.FullName }
     }
 }
+
+function Update-ExportLanguage {
+    $all.Text = Get-UiText 'Select shown'
+    $none.Text = Get-UiText 'Clear shown'
+    $reviewStep.Text = '2   ' + (Get-UiText 'Review dependencies')
+    $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } else { Get-UiText 'Export ZIPs...' }
+    $index = $format.SelectedIndex
+    $format.Items.Clear()
+    $null = $format.Items.Add((Get-UiText 'Individual ZIPs'))
+    $null = $format.Items.Add((Get-UiText 'Single merged ZIP'))
+    $format.SelectedIndex = [Math]::Max(0,$index)
+    Set-AppTheme $script:darkMode
+}
+Update-ControlLanguage $form
+Update-ExportLanguage
 if ($install.Items.Count) { $install.SelectedIndex = 0 }
 while ($true) {
     $workflow = Select-Workflow
