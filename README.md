@@ -58,6 +58,10 @@ The build uses the Windows .NET Framework compiler and produces one GUI executab
 
 This project was developed with assistance from OpenAI Codex. Codex assisted with implementation, interface concepts, and automated checks. Dependency detection can miss requirements, so review the export and test it in the destination modlist.
 
+## Contributors
+
+- **OpenAI Codex** — AI-assisted implementation, interface design, and automated checks.
+
 ## License
 
 The project source is licensed under the MIT License. Exported mods and assets remain subject to their original licenses.
