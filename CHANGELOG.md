@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+- Add a startup language selector with ten languages. The default follows the Windows display language, with English as the fallback.
+- Follow the Windows app theme at launch and offer a light/dark toggle on the startup screen.
+- Use the modern Windows export folder picker and remember the destination. Change it from the startup screen.
+- Some detailed status and error messages still use English.
+
 ## 0.1.1
 
 - Cancel dependency review or an active export and return to the selection.
