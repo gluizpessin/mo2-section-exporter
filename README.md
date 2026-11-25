@@ -46,7 +46,7 @@ The build uses the Windows .NET Framework compiler and produces one GUI executab
 
 ## AI assistance
 
-This project was developed with assistance from OpenAI Codex. Guilherme Pessin defined the workflow and provided feedback from using the app. Codex assisted with implementation, interface concepts, and automated checks. Dependency detection can miss requirements, so review the export and test it in the destination modlist.
+This project was developed with assistance from OpenAI Codex. Codex assisted with implementation, interface concepts, and automated checks. Dependency detection can miss requirements, so review the export and test it in the destination modlist.
 
 ## License
 
