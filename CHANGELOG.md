@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Cancel dependency review or an active export without restarting.
+- Turn dependency review off to export the selected mods directly.
+- Resize the main, review, and import windows. The footer shows the app version.
+- Check for updates on startup. Choose **Update and open** or dismiss the offer and keep the current version.
+
 ## 0.1.0
 
 First public prerelease.
