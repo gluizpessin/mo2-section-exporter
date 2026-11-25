@@ -6,7 +6,7 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 
 ## Download
 
-- [Download v0.1.2 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.2/MO2-Section-Exporter-v0.1.2.exe)
+- [Download v0.1.3 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.3/MO2-Section-Exporter-v0.1.3.exe)
 
 Open the downloaded EXE directly.
 
@@ -53,7 +53,7 @@ The export screen shows the source profile, separator, mod checklist, and export
 1. Close Mod Organizer 2, then choose **Import section**.
 2. Choose the saved folder containing section.json and the ZIPs.
 3. Pick the destination portable MO2 installation and profile. Enter a name for the new separator.
-4. Click **Import section**, then reopen MO2 and check your right-pane plugin order.
+4. Click **Preview…** to check the mod list, destination, extraction size, and name collisions. Confirm the import, then reopen MO2 and check your right-pane plugin order.
 
 ![Import screen with the export folder, destination profile, and new separator filled in](docs/mo2-import.png)
 
