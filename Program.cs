@@ -19,6 +19,7 @@ internal static class Program
             var start = new ProcessStartInfo(executable, "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + path + "\"");
             start.UseShellExecute = false;
             start.CreateNoWindow = true;
+            start.EnvironmentVariables["MO2_EXPORTER_EXE_PATH"] = Assembly.GetExecutingAssembly().Location;
             using (Process exporter = Process.Start(start))
             {
                 exporter.WaitForExit();
