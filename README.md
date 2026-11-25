@@ -6,7 +6,7 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 
 ## Download
 
-- [Download v0.1.0 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.0/MO2-Section-Exporter-v0.1.0.exe)
+- [Download v0.1.1 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.1/MO2-Section-Exporter-v0.1.1.exe)
 - [Download v0.2.0 Preview for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.2.0-preview/MO2-Section-Exporter-v0.2.0-preview.exe) — experimental support for Cyberpunk 2077 and other MO2 games.
 
 Open the downloaded EXE directly.
