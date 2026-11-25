@@ -2,6 +2,14 @@
 
 Portable Windows utility for carrying selected Skyrim Special Edition mods between Mod Organizer 2 instances.
 
+## Benefits
+
+- **Run one portable EXE across MO2 instances.** Use the same app for every supported portable instance without installing a plugin in each modlist.
+- **Keep a section after uninstalling the source list.** Save the ZIPs and manifest outside the old installation, then import them later. Both modlists can use the same disk space at different times.
+- **Reuse mods as configured.** The archives capture installed files, including FOMOD choices and local edits. Individual ZIPs restore separate entries with their relative priority and enabled states.
+- **Review dependencies before moving.** See which mod requires each detected plugin master and flag SKSE or HDT-SMP runtime requirements for review.
+- **Import in one pass.** Create a named separator in the destination profile. The importer checks for name collisions and backs up the profile's mod list.
+
 ## How to
 
 Start the app and choose **Export section** or **Import section**.
