@@ -370,6 +370,132 @@ function Get-DependencyPlan($Installed, $Selected, [switch]$Merged) {
     }
 }
 
+
+function Assert-ImportName([string]$Name) {
+    if (!$Name -or $Name -match '[<>:"/\\|?*\x00-\x1f]|[. ]$' -or
+        $Name -match '^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)' -or $Name -in '.', '..') {
+        throw "Invalid Windows file or folder name: $Name"
+    }
+}
+
+function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName) {
+    Assert-ImportName $SeparatorName
+    Assert-ImportName $ProfileName
+    $profile = Join-Path (Join-Path $Target 'profiles') $ProfileName
+    $mods = Join-Path $Target 'mods'
+    foreach ($path in $Package, $profile, $mods) { Assert-OrdinaryPath $path }
+    $manifestPath = Join-Path $Package 'section.json'
+    $profilePath = Join-Path $profile 'modlist.txt'
+    Assert-OrdinaryPath $manifestPath
+    Assert-OrdinaryPath $profilePath
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged' -or !@($manifest.mods).Count) {
+        throw 'Choose an export folder with a supported section.json.'
+    }
+    $separator = $SeparatorName + '_separator'
+    $jobs = @(if ($manifest.format -eq 'merged') {
+        [pscustomobject]@{ Name = $SeparatorName + ' (Merged)'; Archive = [string]$manifest.archive; Enabled = $true }
+    } else {
+        foreach ($mod in $manifest.mods) {
+            if ($mod.enabled -isnot [bool]) { throw 'Invalid enabled state in section.json.' }
+            [pscustomobject]@{ Name = [string]$mod.name; Archive = [string]$mod.archive; Enabled = $mod.enabled }
+        }
+    })
+    $existing = [IO.File]::ReadAllLines($profilePath)
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($separator) + @($jobs.Name)) {
+        Assert-ImportName $name
+        if (!$names.Add($name) -or (Test-Path -LiteralPath (Join-Path $mods $name)) -or
+            ($existing -contains "+$name") -or ($existing -contains "-$name")) {
+            throw "A mod or separator already uses this name: $name. Choose another separator or resolve the duplicate mod first."
+        }
+    }
+    foreach ($job in $jobs) {
+        if ($job.Name.EndsWith('_separator', [StringComparison]::OrdinalIgnoreCase)) { throw "Invalid mod name: $($job.Name)" }
+        Assert-ImportName $job.Archive
+        if ([IO.Path]::GetExtension($job.Archive) -ine '.zip') { throw 'Expected a ZIP archive.' }
+        $archive = Join-Path $Package $job.Archive
+        Assert-OrdinaryPath $archive
+        if (!(Test-Path -LiteralPath $archive -PathType Leaf)) { throw "ZIP is missing: $($job.Archive)" }
+        $job.Archive = $archive
+    }
+    [pscustomobject]@{ Mods = $mods; Profile = $profilePath; Existing = $existing; Separator = $separator; Jobs = $jobs }
+}
+
+function Assert-Mo2Closed {
+    if (Get-Process -Name ModOrganizer -ErrorAction SilentlyContinue) {
+        throw 'Close Mod Organizer 2 before importing.'
+    }
+}
+
+function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report) {
+    Assert-Mo2Closed
+    $plan = Get-ImportPlan $Package $Target $ProfileName $SeparatorName
+    $token = [guid]::NewGuid().ToString('N')
+    $stage = Join-Path $plan.Mods ('.mo2-import-' + $token)
+    $newProfile = $plan.Profile + '.' + $token + '.tmp'
+    $backup = $plan.Profile + '.before-import-' + $token + '.bak'
+    $published = [Collections.Generic.List[string]]::new()
+    $null = New-Item -Path $stage -ItemType Directory
+    try {
+        foreach ($job in $plan.Jobs) {
+            & $Report "Extracting $($job.Name)..."
+            $modFolder = Join-Path $stage $job.Name
+            $null = New-Item -Path $modFolder -ItemType Directory
+            $zip = [IO.Compression.ZipFile]::OpenRead($job.Archive)
+            try {
+                if (!$zip.Entries.Count) { throw "ZIP is empty: $($job.Archive)" }
+                foreach ($entry in $zip.Entries) {
+                    $entryPath = $entry.FullName.Replace('\','/')
+                    $isDirectory = $entryPath.EndsWith('/')
+                    $parts = $entryPath.TrimEnd('/').Split('/')
+                    foreach ($part in $parts) { Assert-ImportName $part }
+                    $output = Join-Path $modFolder ($parts -join '\')
+                    if (!(Test-Within $output $modFolder)) { throw 'ZIP entry points outside its mod folder.' }
+                    if ($isDirectory) { $null = [IO.Directory]::CreateDirectory($output); continue }
+                    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($output))
+                    $input = $entry.Open()
+                    try {
+                        $file = [IO.File]::Open($output, [IO.FileMode]::CreateNew)
+                        try {
+                            $input.CopyTo($file)
+                            if ($file.Length -ne $entry.Length) { throw "Incomplete ZIP entry: $entryPath" }
+                        } finally { $file.Dispose() }
+                    } finally { $input.Dispose() }
+                }
+            } finally { $zip.Dispose() }
+        }
+        $separatorFolder = Join-Path $stage $plan.Separator
+        $null = New-Item -Path $separatorFolder -ItemType Directory
+        [IO.File]::WriteAllLines((Join-Path $separatorFolder 'meta.ini'), [string[]]@('[General]','modid=0','category="-1,"'))
+        $lines = @($plan.Jobs | ForEach-Object { $(if ($_.Enabled) { '+' } else { '-' }) + $_.Name })
+        [array]::Reverse($lines)
+        $lines += '-' + $plan.Separator
+        $start = 0
+        while ($start -lt $plan.Existing.Count -and $plan.Existing[$start] -match '^(#|\s*$)') { $start++ }
+        $combined = @($plan.Existing | Select-Object -First $start) + $lines + @($plan.Existing | Select-Object -Skip $start)
+        [IO.File]::WriteAllLines($newProfile, [string[]]$combined, [Text.UTF8Encoding]::new($false))
+        Assert-Mo2Closed
+        $current = [IO.File]::ReadAllLines($plan.Profile)
+        if (($current -join "`n") -cne ($plan.Existing -join "`n")) { throw 'The destination profile changed during import.' }
+        foreach ($name in @($plan.Separator) + @($plan.Jobs.Name)) {
+            $output = Join-Path $plan.Mods $name
+            [IO.Directory]::Move((Join-Path $stage $name), $output)
+            $published.Add($name)
+        }
+        [IO.File]::Replace($newProfile, $plan.Profile, $backup)
+        [pscustomobject]@{ Count = $plan.Jobs.Count; Backup = $backup; Separator = $SeparatorName }
+    } catch {
+        foreach ($name in $published) {
+            [IO.Directory]::Move((Join-Path $plan.Mods $name), (Join-Path $stage $name))
+        }
+        throw
+    } finally {
+        if ([IO.File]::Exists($newProfile)) { [IO.File]::Delete($newProfile) }
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 if ($CoreOnly) { return }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -860,6 +986,149 @@ $export.Add_Click({
     }
 })
 
+
+function Show-ImportWindow {
+    $w = New-Object Windows.Forms.Form
+    $w.Text = 'Import section'
+    $w.ClientSize = New-Object Drawing.Size(740, 460)
+    $w.StartPosition = 'CenterScreen'
+    $w.Font = $form.Font
+    $w.BackColor = $form.BackColor
+    function Add-Field($type,$text,$x,$y,$width,$height) {
+        $item = New-Object "Windows.Forms.$type"
+        $item.Text = $text
+        $item.SetBounds($x,$y,$width,$height)
+        $w.Controls.Add($item)
+        $item
+    }
+    function Pick-ImportFolder {
+        $dialog = New-Object Windows.Forms.FolderBrowserDialog
+        try { if ($dialog.ShowDialog($w) -eq 'OK') { $dialog.SelectedPath } }
+        finally { $dialog.Dispose() }
+    }
+    $heading = Add-Field Label 'Import a saved section' 24 18 690 44
+    $heading.Font = New-Object Drawing.Font('Segoe UI',22,[Drawing.FontStyle]::Bold)
+    $null = Add-Field Label 'Export folder containing section.json and ZIPs' 26 78 688 24
+    $package = Add-Field TextBox '' 26 105 565 30
+    $packageButton = Add-Field Button 'Browse...' 608 102 105 33
+    $null = Add-Field Label 'Destination MO2 installation' 26 149 688 24
+    $target = Add-Field ComboBox '' 26 175 565 30
+    $target.DropDownStyle = 'DropDownList'
+    $targetButton = Add-Field Button 'Browse...' 608 172 105 33
+    foreach ($item in $install.Items) { $null = $target.Items.Add($item) }
+    $null = Add-Field Label 'Destination profile' 26 222 330 23
+    $targetProfile = Add-Field ComboBox '' 26 248 330 30
+    $targetProfile.DropDownStyle = 'DropDownList'
+    $null = Add-Field Label 'New separator name' 380 222 333 23
+    $newSeparator = Add-Field TextBox '' 380 248 333 30
+    $statusImport = Add-Field Label 'Close MO2 before importing. The destination profile will be backed up.' 26 309 688 68
+    $statusImport.ForeColor = $muted
+    $back = Add-Field Button 'Back' 26 395 100 38
+    $go = Add-Field Button 'Import section' 535 393 178 42
+    $go.FlatStyle = 'Flat'
+    $go.BackColor = $accent
+    $go.ForeColor = [Drawing.Color]::White
+    $back.Add_Click({ $w.Close() })
+    $target.Add_SelectedIndexChanged({
+        $targetProfile.Items.Clear()
+        if (!$target.SelectedItem) { return }
+        foreach ($dir in Get-ChildItem -LiteralPath (Join-Path ([string]$target.SelectedItem) 'profiles') -Directory) {
+            if (Test-Path -LiteralPath (Join-Path $dir.FullName 'modlist.txt')) { $null = $targetProfile.Items.Add($dir.Name) }
+        }
+        if ($targetProfile.Items.Count) { $targetProfile.SelectedIndex = 0 }
+    })
+    $targetButton.Add_Click({
+        $path = Pick-ImportFolder
+        if (!$path) { return }
+        Add-Install $path
+        if (!$install.Items.Contains($path)) { $statusImport.Text = 'No portable MO2 installation found in that folder.'; return }
+        if (!$target.Items.Contains($path)) { $null = $target.Items.Add($path) }
+        $target.SelectedItem = $path
+    })
+    $packageButton.Add_Click({
+        $path = Pick-ImportFolder
+        if (!$path) { return }
+        try {
+            $manifest = Get-Content -LiteralPath (Join-Path $path 'section.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged') { throw 'Unsupported export folder.' }
+            $package.Text = $path
+            $newSeparator.Text = $manifest.section
+            $statusImport.Text = if ($manifest.format -eq 'merged') { 'Bundle contains one merged mod.' } else { "Bundle contains $(@($manifest.mods).Count) separate mods." }
+        } catch { $statusImport.Text = $_.Exception.Message }
+    })
+    if ($target.Items.Count) { $target.SelectedIndex = 0 }
+    $importTimer = New-Object Windows.Forms.Timer
+    $importTimer.Interval = 150
+    $script:importWorker = $null
+    $w.Add_FormClosing({ param($sender,$eventArgs); if ($script:importWorker) { $eventArgs.Cancel = $true } })
+    $inputs = @($package,$packageButton,$target,$targetButton,$targetProfile,$newSeparator,$back,$go)
+    $importTimer.Add_Tick({
+        $job = $script:importWorker
+        $message = $null
+        while ($job.Queue.TryDequeue([ref]$message)) { $statusImport.Text = $message }
+        if (!$job.Handle.IsCompleted) { return }
+        $importTimer.Stop()
+        try {
+            $result = $job.Worker.EndInvoke($job.Handle)[0]
+            if ($job.Worker.HadErrors) { throw $job.Worker.Streams.Error[0] }
+            $statusImport.Text = "Imported $($result.Count) mod(s) under $($result.Separator)."
+            [void][Windows.Forms.MessageBox]::Show($w, "$($statusImport.Text)$([Environment]::NewLine)Profile backup: $($result.Backup)", $w.Text)
+        } catch { $statusImport.Text = $_.Exception.Message }
+        finally {
+            $job.Worker.Dispose()
+            $script:importWorker = $null
+            foreach ($item in $inputs) { $item.Enabled = $true }
+        }
+    })
+    $go.Add_Click({
+        if (!$package.Text -or !$targetProfile.SelectedItem -or !$newSeparator.Text.Trim()) {
+            $statusImport.Text = 'Choose an export folder, destination profile, and separator name.'
+            return
+        }
+        $workerImport = [PowerShell]::Create()
+        $queueImport = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+        try {
+            $null = $workerImport.AddScript({
+                param($Script,$Package,$Target,$Profile,$Separator,$Queue)
+                . $Script -CoreOnly
+                Import-Section $Package $Target $Profile $Separator { param($message); $Queue.Enqueue($message) }
+            }).AddArgument($scriptFile).AddArgument($package.Text).AddArgument([string]$target.SelectedItem).
+                AddArgument([string]$targetProfile.SelectedItem).AddArgument($newSeparator.Text.Trim()).AddArgument($queueImport)
+            $script:importWorker = @{ Worker = $workerImport; Queue = $queueImport; Handle = $workerImport.BeginInvoke() }
+            foreach ($item in $inputs) { $item.Enabled = $false }
+            $statusImport.Text = 'Checking import files...'
+            $importTimer.Start()
+        } catch { $workerImport.Dispose(); $statusImport.Text = $_.Exception.Message }
+    })
+    try { [void]$w.ShowDialog() } finally { $importTimer.Dispose(); $w.Dispose() }
+}
+
+function Select-Workflow {
+    $welcome = New-Object Windows.Forms.Form
+    $welcome.Text = 'MO2 Section Exporter'
+    $welcome.ClientSize = New-Object Drawing.Size(640, 245)
+    $welcome.StartPosition = 'CenterScreen'
+    $welcome.Font = $form.Font
+    $welcome.BackColor = $form.BackColor
+    $heading = New-Object Windows.Forms.Label
+    $heading.Text = 'What would you like to do?'
+    $heading.Font = New-Object Drawing.Font('Segoe UI', 22, [Drawing.FontStyle]::Bold)
+    $heading.SetBounds(25, 22, 590, 50)
+    $welcome.Controls.Add($heading)
+    $actions = @(@{Text='Import section';Result='Yes';X=26},@{Text='Export section';Result='No';X=326})
+    foreach ($action in $actions) {
+        $button = New-Object Windows.Forms.Button
+        $button.Text = $action.Text
+        $button.DialogResult = $action.Result
+        $button.SetBounds($action.X, 103, 285, 91)
+        $button.FlatStyle = 'Flat'
+        $button.BackColor = $surface
+        $button.ForeColor = $accent
+        $welcome.Controls.Add($button)
+    }
+    try { $welcome.ShowDialog() } finally { $welcome.Dispose() }
+}
+
 foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
     foreach ($folderName in 'Modlists', 'Wabbajack') {
         $directory = Join-Path $drive.Root $folderName
@@ -867,6 +1136,11 @@ foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
     }
 }
 if ($install.Items.Count) { $install.SelectedIndex = 0 }
-[void]$form.ShowDialog()
+while ($true) {
+    $workflow = Select-Workflow
+    if ($workflow -eq 'Yes') { Show-ImportWindow; continue }
+    if ($workflow -eq 'No') { [void]$form.ShowDialog() }
+    break
+}
 $timer.Dispose()
 $form.Dispose()
