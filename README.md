@@ -21,7 +21,7 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 
 See the [changelog](CHANGELOG.md) for released features and the [roadmap](ROADMAP.md) for planned work.
 
-The separate v0.2.0 preview adds game detection, configured MO2 paths, and game-mismatch protection. Both ZIP formats passed synthetic Cyberpunk 2077 transfer tests. Live Cyberpunk validation is pending. The GitHub prerelease remains v0.1.0.
+The [experimental v0.2.0 preview](https://github.com/gluizpessin/mo2-section-exporter/releases/tag/v0.2.0-preview) adds game detection, configured MO2 paths, and game-mismatch protection. Both ZIP formats passed synthetic Cyberpunk 2077 transfer tests. Live Cyberpunk validation is pending.
 
 ## How to
 
