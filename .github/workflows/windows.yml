@@ -1,0 +1,18 @@
+name: Windows build and smoke test
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the portable EXE
+        shell: powershell
+        run: .\Build.ps1
+      - name: Exercise export and import
+        shell: powershell
+        run: .\tests\Smoke.ps1
