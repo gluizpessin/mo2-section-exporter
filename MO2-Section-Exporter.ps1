@@ -41,6 +41,14 @@ function Assert-OrdinaryPath($Path) {
     }
 }
 
+$BaseGameMasters = @('Skyrim.esm','Update.esm','Dawnguard.esm','HearthFires.esm','Dragonborn.esm')
+
+function Test-BaseGameFile($RelativePath) {
+    $RelativePath -in $BaseGameMasters -or
+        $RelativePath -match '^(?:Skyrim - (?:Animations|Interface|Meshes[01]|Misc|Shaders|Sounds|Textures[0-8]|Voices_[a-z]{2}[0-9]+)|MarketplaceTextures|_ResourcePack)\.bsa$' -or
+        $RelativePath -ieq '_ResourcePack.esl'
+}
+
 function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $Report, [switch]$Merged) {
     $Source = (Get-Item -LiteralPath $Source).FullName
     $Destination = (Get-Item -LiteralPath $Destination).FullName
@@ -59,10 +67,21 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
         }
         $files = @($children | Where-Object { !$_.PSIsContainer })
         if (!$files.Count) { throw "This mod has no files: $($mod.Name)" }
+        $stockFiles = @($files | Where-Object {
+            Test-BaseGameFile $_.FullName.Substring($mod.Path.Length + 1)
+        })
+        if ($stockFiles.Count) {
+            $files = @($files | Where-Object { $_ -notin $stockFiles })
+            if (!$files.Count -or ($files.Count -eq 1 -and $files[0].Name -ieq 'meta.ini' -and $files[0].DirectoryName -ieq $mod.Path)) {
+                continue
+            }
+        }
         $paths[$mod.Name] = $files
         $inputBytes += ($files | Measure-Object Length -Sum).Sum
     }
 
+    $Selected = @($Selected | Where-Object { $paths.ContainsKey($_.Name) })
+    if (!$Selected.Count) { throw 'The selection contains only Skyrim stock files. There is nothing to export.' }
     $free = (Get-Item -LiteralPath $Destination).PSDrive.Free
     if ($null -ne $free -and $free -le 0) {
         throw 'The destination drive has no free space.'
@@ -213,10 +232,55 @@ function Read-Masters($Path) {
     } finally { $reader.Dispose() }
 }
 
+function Find-SmpMesh($MeshDirectory) {
+    $marker = 'HDT Skinned Mesh Physics Object'
+    $buffer = [char[]]::new(65536)
+    foreach ($mesh in Get-ChildItem -LiteralPath $MeshDirectory -Recurse -File -Filter '*.nif') {
+        $reader = [IO.StreamReader]::new($mesh.FullName, [Text.Encoding]::GetEncoding(28591), $false)
+        try {
+            $header = $reader.ReadLine()
+            if (!$header -or !$header.StartsWith('Gamebryo File Format', [StringComparison]::Ordinal)) { continue }
+            $tail = ''
+            while (($count = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $chunk = $tail + [string]::new($buffer, 0, $count)
+                if ($chunk.IndexOf($marker, [StringComparison]::Ordinal) -ge 0) { return $mesh.FullName }
+                $tail = $chunk.Substring([Math]::Max(0, $chunk.Length - $marker.Length + 1))
+            }
+        } finally { $reader.Dispose() }
+    }
+}
+
+function Get-RuntimeRequirements($Mod, $SmpProvider) {
+    $skse = Join-Path $Mod.Path 'SKSE\Plugins'
+    $config = Join-Path $Mod.Path 'SKSE\Plugins\hdtSkinnedMeshConfigs'
+    if (Test-Path -LiteralPath $skse -PathType Container) {
+        $dll = Get-ChildItem -LiteralPath $skse -File -Filter '*.dll' | Select-Object -First 1
+        if ($dll) {
+            [pscustomobject]@{ Master = 'SKSE runtime'; Provider = 'Destination setup'; RequiredBy = $Mod.Name; Plugin = $dll.Name; Status = 'Check runtime' }
+        }
+    }
+    if ($SmpProvider -eq $Mod.Name -or (Test-Path -LiteralPath (Join-Path $skse 'hdtSMP64.dll') -PathType Leaf)) { return }
+    $evidence = $null
+    if (Test-Path -LiteralPath $config -PathType Container) {
+        $xml = Get-ChildItem -LiteralPath $config -Recurse -File -Filter '*.xml' | Select-Object -First 1
+        if ($xml) { $evidence = $xml.FullName }
+    }
+    $meshes = Join-Path $Mod.Path 'meshes'
+    if (!$evidence -and (Test-Path -LiteralPath $meshes -PathType Container)) { $evidence = Find-SmpMesh $meshes }
+    if ($evidence) {
+        [pscustomobject]@{
+            Master = 'HDT-SMP / Faster HDT-SMP'
+            Provider = if ($SmpProvider) { $SmpProvider } else { 'Destination setup' }
+            RequiredBy = $Mod.Name
+            Plugin = $evidence.Substring($Mod.Path.Length + 1)
+            Status = 'Check runtime'
+        }
+    }
+}
 function Get-DependencyPlan($Installed, $Selected, [switch]$Merged) {
     $byMod = @{}
     $providers = @{}
-    $gameMasters = @('Skyrim.esm','Update.esm','Dawnguard.esm','HearthFires.esm','Dragonborn.esm')
+    $gameMasters = $BaseGameMasters + '_ResourcePack.esl'
     foreach ($mod in $Installed) {
         $plugins = @(Get-ChildItem -LiteralPath $mod.Path -File | Where-Object Extension -in '.esp','.esm','.esl')
         $byMod[$mod.Name] = $plugins
@@ -239,22 +303,37 @@ function Get-DependencyPlan($Installed, $Selected, [switch]$Merged) {
             }
         }
         $roundNotes = [Collections.Generic.List[string]]::new()
+        $requirements = [Collections.Generic.List[object]]::new()
         foreach ($mod in $full) {
             foreach ($plugin in $byMod[$mod.Name]) {
                 if ($Merged -and $visible[$plugin.Name] -ne $mod.Name) { continue }
                 try { $masters = @(Read-Masters $plugin.FullName) }
                 catch { $roundNotes.Add("Could not read $($plugin.Name) in $($mod.Name): $($_.Exception.Message)"); continue }
                 foreach ($master in $masters) {
-                    if ($master -in $gameMasters) { $roundNotes.Add("Destination game: $master"); continue }
-                    $candidates = $providers[$master]
-                    if (!$candidates) { $roundNotes.Add("Missing $master, required by $($plugin.Name)"); continue }
-                    $included = @($candidates | Where-Object { $chosen.ContainsKey($_.Name) })
-                    $active = @($candidates | Where-Object Enabled)
-                    if ($included.Count -and ($Merged -or ($included | Where-Object Enabled))) { continue }
-                    if ($candidates.Count -gt 1) {
-                        $roundNotes.Add("Review providers for $master, required by $($plugin.Name): $($candidates.Name -join ', ')")
+                    $provider = $null
+                    $state = 'Missing'
+                    if ($master -in $gameMasters) { $state = 'Base game' }
+                    else {
+                        $candidates = $providers[$master]
+                        if ($candidates) {
+                            $included = @($candidates | Where-Object { $chosen.ContainsKey($_.Name) })
+                            $active = @($candidates | Where-Object Enabled)
+                            $usable = if ($Merged) { @($included) } else { @($included | Where-Object Enabled) }
+                            $provider = if ($usable) { @($usable)[-1] } elseif ($active) { $active[-1] } else { $candidates[$candidates.Count - 1] }
+                            $state = if ($additions.ContainsKey($provider.Name) -or !$chosen.ContainsKey($provider.Name)) { 'To add' } else { 'Selected' }
+                            if ($candidates.Count -gt 1 -and !$usable) {
+                                $roundNotes.Add("Review providers for $master, required by $($plugin.Name): $($candidates.Name -join ', ')")
+                            }
+                        }
                     }
-                    $provider = if ($active) { $active[-1] } else { $candidates[$candidates.Count - 1] }
+                    $requirements.Add([pscustomobject]@{
+                        Master = $master
+                        Provider = if ($provider) { $provider.Name } else { '' }
+                        RequiredBy = $mod.Name
+                        Plugin = $plugin.Name
+                        Status = $state
+                    })
+                    if (!$provider) { continue }
                     if (!$provider.Enabled -and !$Merged) {
                         $roundNotes.Add("Enable $($provider.Name) in the destination for $master, required by $($plugin.Name)")
                     }
@@ -267,18 +346,26 @@ function Get-DependencyPlan($Installed, $Selected, [switch]$Merged) {
             }
         }
     } while ($changed)
+    $smpProvider = $Installed | Where-Object {
+        $_.Enabled -and (Test-Path -LiteralPath (Join-Path $_.Path 'SKSE\Plugins\hdtSMP64.dll') -PathType Leaf)
+    } | Select-Object -Last 1
     foreach ($mod in $full) {
-        $skse = Join-Path $mod.Path 'SKSE\Plugins'
-        if (Test-Path -LiteralPath $skse -PathType Container) {
-            if (Get-ChildItem -LiteralPath $skse -File -Filter '*.dll' | Select-Object -First 1) {
-                $notes.Add("SKSE DLL: $($mod.Name). Check Skyrim runtime and any additional requirements.")
+        try {
+            foreach ($requirement in Get-RuntimeRequirements $mod $smpProvider.Name) {
+                $requirements.Add($requirement)
+                if ($requirement.Master -eq 'SKSE runtime') {
+                    $notes.Add("SKSE DLL: $($mod.Name). Check Skyrim runtime and any additional requirements.")
+                }
             }
+        } catch {
+            $notes.Add("Could not finish SKSE/SMP scan for $($mod.Name): $($_.Exception.Message)")
         }
     }
     foreach ($line in $roundNotes) { $notes.Add($line) }
     [pscustomobject]@{
         Mods = $full
         Added = @($full | Where-Object { $additions.ContainsKey($_.Name) } | ForEach-Object { $additions[$_.Name] })
+        Requirements = @($requirements | Sort-Object Master, RequiredBy, Plugin -Unique)
         Notes = @($notes | Sort-Object -Unique)
     }
 }
@@ -291,9 +378,9 @@ Add-Type -AssemblyName System.Drawing
 
 $form = New-Object Windows.Forms.Form
 $form.Text = 'MO2 Section Exporter'
-$form.ClientSize = New-Object Drawing.Size(820, 755)
-$form.BackColor = [Drawing.ColorTranslator]::FromHtml('#11151D')
-$form.ForeColor = [Drawing.ColorTranslator]::FromHtml('#EDF2FA')
+$form.ClientSize = New-Object Drawing.Size(820, 778)
+$form.BackColor = [Drawing.ColorTranslator]::FromHtml('#F3F6FA')
+$form.ForeColor = [Drawing.ColorTranslator]::FromHtml('#17243A')
 $form.Font = New-Object Drawing.Font('Segoe UI', 10)
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -308,59 +395,79 @@ function Add-Control($Type, $Text, $X, $Y, $Width, $Height) {
     $control
 }
 
-$surface = [Drawing.ColorTranslator]::FromHtml('#202837')
-$muted = [Drawing.ColorTranslator]::FromHtml('#ABB9CD')
-$accent = [Drawing.ColorTranslator]::FromHtml('#86B8FF')
+$surface = [Drawing.ColorTranslator]::FromHtml('#FFFFFF')
+$muted = [Drawing.ColorTranslator]::FromHtml('#465875')
+$accent = [Drawing.ColorTranslator]::FromHtml('#175BCD')
 
-$title = Add-Control Label 'MO2 Section Exporter' 24 18 772 42
+$theme = Add-Control Button 'Dark mode' 674 24 120 33
+$title = Add-Control Label 'MO2 Section Exporter' 26 17 630 43
 $title.Font = New-Object Drawing.Font('Segoe UI', 23, [Drawing.FontStyle]::Bold)
-$subtitle = Add-Control Label 'Save selected mods and their requirements for your next modlist.' 26 64 770 26
+$subtitle = Add-Control Label 'Save selected mods and their requirements for your next modlist.' 26 61 768 24
 $subtitle.ForeColor = $muted
+$chooseStep = Add-Control Label '1   Choose mods' 26 99 256 31
+$reviewStep = Add-Control Label '2   Review dependencies' 282 99 256 31
+$exportStep = Add-Control Label '3   Export' 538 99 256 31
+$steps = @($chooseStep, $reviewStep, $exportStep)
+foreach ($step in $steps) {
+    $step.TextAlign = 'MiddleCenter'
+    $step.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold)
+}
+function Set-GuidedStep([int]$Current) {
+    $script:currentStep = $Current
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        $steps[$i].BackColor = if ($i -eq $Current) { $accent } else { $script:stepBackground }
+        $steps[$i].ForeColor = if ($i -eq $Current) { [Drawing.Color]::White } else { $muted }
+    }
+}
+$script:stepBackground = [Drawing.ColorTranslator]::FromHtml('#E5EBF5'); Set-GuidedStep 0
 
-$null = Add-Control Label 'MO2 installation' 26 107 600 23
-$install = Add-Control ComboBox '' 26 133 650 30
+$null = Add-Control Label 'MO2 installation' 26 150 600 23
+$install = Add-Control ComboBox '' 26 175 650 30
 $install.DropDownStyle = 'DropDownList'
-$browse = Add-Control Button 'Browse...' 690 131 104 32
-$null = Add-Control Label 'Profile' 26 179 360 23
-$profile = Add-Control ComboBox '' 26 205 366 30
+$browse = Add-Control Button 'Browse...' 690 173 104 32
+$null = Add-Control Label 'Profile' 26 215 360 23
+$profile = Add-Control ComboBox '' 26 240 366 30
 $profile.DropDownStyle = 'DropDownList'
-$null = Add-Control Label 'Separator' 412 179 382 23
-$separator = Add-Control ComboBox '' 412 205 382 30
+$null = Add-Control Label 'Separator' 412 215 382 23
+$separator = Add-Control ComboBox '' 412 240 382 30
 $separator.DropDownStyle = 'DropDownList'
 
-$selection = Add-Control Label 'Mods' 26 253 475 27
+$selection = Add-Control Label 'Mods' 26 288 475 27
 $selection.Font = New-Object Drawing.Font('Segoe UI', 11, [Drawing.FontStyle]::Bold)
-$all = Add-Control Button 'Select all' 576 248 104 32
-$none = Add-Control Button 'Clear' 690 248 104 32
-$checks = Add-Control CheckedListBox '' 26 289 768 264
+$all = Add-Control Button 'Select all' 576 283 104 32
+$none = Add-Control Button 'Clear' 690 283 104 32
+$null = Add-Control Label 'Filter by mod name' 26 326 150 24
+$search = Add-Control TextBox '' 180 322 614 29
+$search.AccessibleName = 'Filter by mod name'
+$checks = Add-Control CheckedListBox '' 26 360 768 206
 $checks.CheckOnClick = $true
 $checks.HorizontalScrollbar = $true
 $checks.BorderStyle = 'FixedSingle'
 
-$null = Add-Control Label 'Export format' 26 575 118 24
-$format = Add-Control ComboBox '' 155 570 300 31
+$null = Add-Control Label 'Export format' 26 586 118 24
+$format = Add-Control ComboBox '' 155 581 300 31
 $format.DropDownStyle = 'DropDownList'
 $null = $format.Items.Add('Individual ZIPs')
 $null = $format.Items.Add('Single merged ZIP')
 $format.SelectedIndex = 0
-$formatHelp = Add-Control Label '' 26 603 555 24
+$formatHelp = Add-Control Label '' 26 615 555 24
 $formatHelp.ForeColor = $muted
 $format.Add_SelectedIndexChanged({
     $formatHelp.Text = if ($format.SelectedIndex -eq 1) { 'Higher-priority selected mods win file conflicts. Plugin order is unchanged.' } else { '' }
 })
-$status = Add-Control Label 'Choose an installed MO2 modlist.' 26 630 540 46
+$status = Add-Control Label 'Choose an installed MO2 modlist.' 26 650 540 46
 $status.ForeColor = $muted
-$progress = Add-Control ProgressBar '' 26 674 768 13
+$progress = Add-Control ProgressBar '' 26 704 768 13
 $progress.Style = 'Continuous'
 $progress.Maximum = 100
 $progress.Visible = $false
-$metrics = Add-Control Label '' 26 695 768 28
+$metrics = Add-Control Label '' 26 725 768 28
 $metrics.ForeColor = $muted
-$export = Add-Control Button 'Export ZIPs...' 606 617 188 46
+$export = Add-Control Button 'Review selection' 606 646 188 46
 $export.Font = New-Object Drawing.Font('Segoe UI', 11, [Drawing.FontStyle]::Bold)
 $export.Enabled = $false
 
-foreach ($field in $install, $profile, $separator, $checks, $format) {
+foreach ($field in $install, $profile, $separator, $checks, $format, $search) {
     $field.BackColor = $surface
     $field.ForeColor = $form.ForeColor
 }
@@ -371,30 +478,93 @@ foreach ($button in $browse, $all, $none, $export) {
     $button.ForeColor = $form.ForeColor
 }
 $export.BackColor = $accent
-$export.ForeColor = $form.BackColor
+$export.ForeColor = [Drawing.Color]::White
 
-function Update-Selection([int]$Count) {
-    $selection.Text = "Mods  |  $Count of $($checks.Items.Count) selected"
-    $export.Enabled = $Count -gt 0
-    $all.Enabled = $Count -lt $checks.Items.Count
-    $none.Enabled = $Count -gt 0
+$script:darkMode = $false
+$theme.Add_Click({
+    $script:darkMode = !$script:darkMode
+    $palette = if ($script:darkMode) {
+        @('#111826','#E8EFFA','#202C3F','#B9C8DB','#255CC1','#26344A')
+    } else {
+        @('#F3F6FA','#17243A','#FFFFFF','#465875','#175BCD','#E5EBF5')
+    }
+    $colors = @($palette | ForEach-Object { [Drawing.ColorTranslator]::FromHtml($_) })
+    $form.BackColor = $colors[0]
+    $form.ForeColor = $colors[1]
+    $script:surface = $colors[2]
+    $script:muted = $colors[3]
+    $script:accent = $colors[4]
+    $script:stepBackground = $colors[5]
+    foreach ($control in $subtitle, $formatHelp, $status, $metrics) { $control.ForeColor = $muted }
+    foreach ($control in $install, $profile, $separator, $checks, $format, $search, $browse, $all, $none, $theme) {
+        $control.ForeColor = $form.ForeColor
+        $control.BackColor = $surface
+    }
+    $export.BackColor = $accent
+    $theme.Text = if ($script:darkMode) { 'Light mode' } else { 'Dark mode' }
+    Set-GuidedStep $script:currentStep
+})
+$theme.FlatStyle = 'Flat'
+$theme.FlatAppearance.BorderSize = 0
+$theme.BackColor = $surface
+$script:selectedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$script:sectionMods = @()
+$script:visibleMods = @()
+$script:refreshingList = $false
+
+function Update-Selection {
+    $count = $script:selectedNames.Count
+    $selection.Text = "Mods  |  $count of $($script:sectionMods.Count) selected  |  $($script:visibleMods.Count) shown"
+    $export.Enabled = $count -gt 0
+    $all.Enabled = $script:visibleMods.Count -gt $checks.CheckedItems.Count
+    $none.Enabled = $checks.CheckedItems.Count -gt 0
 }
 
+function Refresh-ModList {
+    $filter = $search.Text.Trim()
+    $script:visibleMods = @($script:sectionMods | Where-Object {
+        $_.Name.IndexOf($filter, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+    $script:refreshingList = $true
+    $checks.BeginUpdate()
+    try {
+        $checks.Items.Clear()
+        foreach ($mod in $script:visibleMods) {
+            $label = if ($mod.Enabled) { $mod.Name } else { $mod.Name + ' (disabled in source)' }
+            $null = $checks.Items.Add($label, $script:selectedNames.Contains($mod.Name))
+        }
+    } finally {
+        $checks.EndUpdate()
+        $script:refreshingList = $false
+    }
+    Update-Selection
+}
+
+$search.Add_TextChanged({ Refresh-ModList })
 $checks.Add_ItemCheck({
     param($sender, $eventArgs)
-    $count = $checks.CheckedItems.Count
-    if ($eventArgs.CurrentValue -eq 'Checked') { $count-- }
-    if ($eventArgs.NewValue -eq 'Checked') { $count++ }
-    Update-Selection $count
+    if ($script:refreshingList) { return }
+    $name = $script:visibleMods[$eventArgs.Index].Name
+    if ($eventArgs.NewValue -eq 'Checked') { $null = $script:selectedNames.Add($name) }
+    else { $null = $script:selectedNames.Remove($name) }
+    Update-Selection
+    $checked = $checks.CheckedItems.Count
+    if ($eventArgs.CurrentValue -eq 'Checked') { $checked-- }
+    if ($eventArgs.NewValue -eq 'Checked') { $checked++ }
+    $all.Enabled = $script:visibleMods.Count -gt $checked
+    $none.Enabled = $checked -gt 0
 })
+$all.Text = 'Select shown'
+$none.Text = 'Clear shown'
 $all.Add_Click({
-    for ($i = 0; $i -lt $checks.Items.Count; $i++) { $checks.SetItemChecked($i, $true) }
+    foreach ($mod in $script:visibleMods) { $null = $script:selectedNames.Add($mod.Name) }
+    Refresh-ModList
 })
 $none.Add_Click({
-    for ($i = 0; $i -lt $checks.Items.Count; $i++) { $checks.SetItemChecked($i, $false) }
+    foreach ($mod in $script:visibleMods) { $null = $script:selectedNames.Remove($mod.Name) }
+    Refresh-ModList
 })
-Update-Selection 0
-
+Update-Selection
 function Select-Folder($Description) {
     $dialog = New-Object Windows.Forms.FolderBrowserDialog
     $dialog.Description = $Description
@@ -415,8 +585,7 @@ $install.Add_SelectedIndexChanged({
     if ($install.SelectedIndex -lt 0) { return }
     $profile.Items.Clear()
     $separator.Items.Clear()
-    $checks.Items.Clear()
-    Update-Selection 0
+    $script:sectionMods = @(); $script:selectedNames.Clear(); Refresh-ModList
     $root = [string]$install.SelectedItem
     foreach ($dir in Get-ChildItem -LiteralPath (Join-Path $root 'profiles') -Directory) {
         if (Test-Path -LiteralPath (Join-Path $dir.FullName 'modlist.txt')) { $null = $profile.Items.Add($dir.Name) }
@@ -430,8 +599,7 @@ $install.Add_SelectedIndexChanged({
 $profile.Add_SelectedIndexChanged({
     if ($profile.SelectedIndex -lt 0) { return }
     $separator.Items.Clear()
-    $checks.Items.Clear()
-    Update-Selection 0
+    $script:sectionMods = @(); $script:selectedNames.Clear(); Refresh-ModList
     $root = [string]$install.SelectedItem
     $directory = Join-Path (Join-Path $root 'profiles') ([string]$profile.SelectedItem)
     $script:sections = @(Get-Sections $directory (Join-Path $root 'mods'))
@@ -439,16 +607,16 @@ $profile.Add_SelectedIndexChanged({
     if ($separator.Items.Count) { $separator.SelectedIndex = 0 }
 })
 $separator.Add_SelectedIndexChanged({
-    $checks.Items.Clear()
-    Update-Selection 0
-    if ($separator.SelectedIndex -lt 0) { return }
-    $section = $script:sections[$separator.SelectedIndex]
-    foreach ($mod in $section.Mods) {
-        $label = if ($mod.Enabled) { $mod.Name } else { $mod.Name + ' (disabled in source)' }
-        $null = $checks.Items.Add($label, $true)
+    $script:sectionMods = @()
+    $script:selectedNames.Clear()
+    if ($separator.SelectedIndex -ge 0) {
+        $section = $script:sections[$separator.SelectedIndex]
+        $script:sectionMods = @($section.Mods.ToArray())
+        foreach ($mod in $script:sectionMods) { $null = $script:selectedNames.Add($mod.Name) }
     }
-    Update-Selection $checks.CheckedItems.Count
-    $status.Text = 'Uncheck any mods you want to skip. Choose a destination outside this modlist.'
+    $search.Clear()
+    Refresh-ModList
+    $status.Text = 'Choose the mods and ZIP format, then review the dependencies.'
 })
 $browse.Add_Click({
     $path = Select-Folder 'Choose the folder containing ModOrganizer.ini, mods and profiles.'
@@ -462,17 +630,39 @@ $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 150
 $script:job = $null
 $scriptFile = $PSCommandPath
-$controls = @($install, $browse, $profile, $separator, $checks, $export, $all, $none, $format)
+$controls = @($install, $browse, $profile, $separator, $checks, $export, $all, $none, $format, $search)
 $form.Add_FormClosing({
     param($sender, $eventArgs)
     if ($script:job) {
         $eventArgs.Cancel = $true
-        $status.Text = 'An export is still running. Wait for it to finish before closing.'
+        $status.Text = 'A scan or export is running. Wait for it to finish before closing.'
     }
 })
 $timer.Add_Tick({
     $job = $script:job
     if (!$job) { return }
+    if ($job.Kind -eq 'Scan') {
+        if (!$job.Handle.IsCompleted) { return }
+        $timer.Stop()
+        $plan = $null
+        try {
+            $result = $job.Worker.EndInvoke($job.Handle)
+            if ($job.Worker.HadErrors) { throw $job.Worker.Streams.Error[0] }
+            $plan = $result[0]
+        } catch {
+            $status.Text = 'Dependency scan failed.'
+            [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, $form.Text)
+        } finally {
+            $job.Worker.Dispose()
+            $script:job = $null
+            $progress.Visible = $false
+            $progress.Style = 'Continuous'
+            foreach ($control in $controls) { $control.Enabled = $true }
+            Update-Selection
+        }
+        if ($plan) { Show-DependencyReview $plan $job.Selected $job.Section } else { Set-GuidedStep 0 }
+        return
+    }
     $message = $null
     while ($job.Queue.TryDequeue([ref]$message)) {
         if ($message -match '^#progress\|(\d+)\|(\d+)$') {
@@ -497,9 +687,10 @@ $timer.Add_Tick({
         $result = $job.Worker.EndInvoke($job.Handle)
         if ($job.Worker.HadErrors) { throw $job.Worker.Streams.Error[0] }
         $progress.Value = 100
-        $status.Text = "Verified ZIP archives: $($job.Count)."
+        $status.Text = "Verified ZIP archives: $(@(Get-ChildItem -LiteralPath ([string]$result[0]) -File -Filter '*.zip').Count)."
         [void][Windows.Forms.MessageBox]::Show($form, "Export complete.$([Environment]::NewLine)$result", $form.Text)
     } catch {
+        Set-GuidedStep 0
         $status.Text = 'Export stopped.'
         $metrics.Text = 'Export incomplete  |  ' + $metrics.Text
         [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, $form.Text)
@@ -507,56 +698,10 @@ $timer.Add_Tick({
         $job.Worker.Dispose()
         $script:job = $null
         foreach ($control in $controls) { $control.Enabled = $true }
-        Update-Selection $checks.CheckedItems.Count
+        Update-Selection
     }
 })
-$export.Add_Click({
-    if (!$checks.CheckedIndices.Count) {
-        $status.Text = 'Select at least one mod to export.'
-        return
-    }
-    $destination = Select-Folder 'Choose an existing destination outside the source installation.'
-    if (!$destination) { return }
-    $section = $script:sections[$separator.SelectedIndex]
-    $selected = @($checks.CheckedIndices | ForEach-Object { $section.Mods[$_] })
-
-    try {
-        $allMods = @($script:sections | ForEach-Object { $_.Mods })
-        $plan = Get-DependencyPlan $allMods $selected -Merged:($format.SelectedIndex -eq 1)
-        $review = New-Object Windows.Forms.Form
-        $review.Text = 'Export dependency preview'
-        $review.ClientSize = New-Object Drawing.Size(690,450)
-        $review.StartPosition = 'CenterParent'
-        $review.Font = $form.Font
-        $review.BackColor = $form.BackColor
-        $review.ForeColor = $form.ForeColor
-        $details = New-Object Windows.Forms.TextBox
-        $details.Multiline = $true
-        $details.ReadOnly = $true
-        $details.ScrollBars = 'Both'
-        $details.WordWrap = $false
-        $details.BackColor = $surface
-        $details.ForeColor = $form.ForeColor
-        $details.SetBounds(14,14,662,375)
-        $details.Text = (@("$($selected.Count) selected mods. $($plan.Added.Count) required mods found.",'', 'Required mods to add:') +
-            $plan.Added + @('', 'Dependency notes:') + $plan.Notes) -join [Environment]::NewLine
-        $review.Controls.Add($details)
-        foreach ($buttonInfo in @(@('Include required mods','Yes',14), @('Selected mods only','No',226), @('Cancel','Cancel',548))) {
-            $button = New-Object Windows.Forms.Button
-            $button.Text = $buttonInfo[0]
-            $button.DialogResult = $buttonInfo[1]
-            $button.SetBounds($buttonInfo[2],401,128,35)
-            if ($buttonInfo[1] -ne 'Cancel') { $button.Width = 195 }
-            $review.Controls.Add($button)
-            if ($buttonInfo[1] -eq 'Cancel') { $review.CancelButton = $button }
-        }
-        try { $choice = $review.ShowDialog($form) } finally { $review.Dispose() }
-        if ($choice -notin 'Yes','No') { return }
-        if ($choice -eq 'Yes') { $selected = $plan.Mods }
-    } catch {
-        [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Dependency scan failed')
-        return
-    }
+function Start-Export($destination, $section, $selected) {
     $queue = [Collections.Concurrent.ConcurrentQueue[string]]::new()
     $worker = [PowerShell]::Create()
     try {
@@ -571,9 +716,142 @@ $export.Add_Click({
             AddArgument($section.Name).AddArgument($selected).AddArgument([string]$profile.SelectedItem).AddArgument($queue).AddArgument($format.SelectedIndex -eq 1)
         $script:job = @{ Worker = $worker; Queue = $queue; Clock = [Diagnostics.Stopwatch]::StartNew(); Bytes = [long]0; Total = [long]0; Handle = $worker.BeginInvoke(); Count = $(if ($format.SelectedIndex -eq 1) { 1 } else { $selected.Count }) }
         foreach ($control in $controls) { $control.Enabled = $false }
+        Set-GuidedStep 2
         $status.Text = 'Checking selected mod files...'
         $progress.Value = 0
         $metrics.Text = ''
+        $progress.Visible = $true
+        $timer.Start()
+    } catch {
+        $worker.Dispose()
+        [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, $form.Text)
+    }
+}
+
+function Show-DependencyReview($plan, $selected, $section) {
+    $review = New-Object Windows.Forms.Form
+    $review.Text = 'MO2 Section Exporter'
+    $review.ClientSize = New-Object Drawing.Size(820, 650)
+    $review.FormBorderStyle = 'FixedDialog'
+    $review.MaximizeBox = $false
+    $review.MinimizeBox = $false
+    $review.StartPosition = 'CenterParent'
+    $review.Font = $form.Font
+    $review.BackColor = $form.BackColor
+    $review.ForeColor = $form.ForeColor
+
+    function Add-ReviewControl($type, $text, $x, $y, $width, $height) {
+        $control = New-Object "Windows.Forms.$type"
+        $control.Text = $text
+        $control.SetBounds($x, $y, $width, $height)
+        $review.Controls.Add($control)
+        $control
+    }
+
+    $heading = Add-ReviewControl Label 'Review dependencies' 24 18 710 43
+    $heading.Font = New-Object Drawing.Font('Segoe UI', 23, [Drawing.FontStyle]::Bold)
+    $context = Add-ReviewControl Label "$($section.Name)  |  $($format.SelectedItem)" 26 67 708 26
+    $context.ForeColor = $muted
+
+    $null = Add-ReviewControl Label "Selected mods ($($selected.Count))" 26 103 768 25
+    $selectedList = Add-ReviewControl ListBox '' 26 130 768 77
+    $selectedList.HorizontalScrollbar = $true
+    foreach ($mod in $selected) { $null = $selectedList.Items.Add($mod.Name) }
+
+    $null = Add-ReviewControl Label "Requirements ($($plan.Requirements.Count))" 26 217 768 25
+    $grid = Add-ReviewControl DataGridView '' 26 245 768 205
+    $grid.ReadOnly = $true
+    $grid.AllowUserToAddRows = $false
+    $grid.AllowUserToDeleteRows = $false
+    $grid.RowHeadersVisible = $false
+    $grid.AutoSizeColumnsMode = 'Fill'
+    $grid.SelectionMode = 'FullRowSelect'
+    $grid.EnableHeadersVisualStyles = $false
+    $grid.BackgroundColor = $surface
+    $grid.GridColor = $script:stepBackground
+    $grid.ColumnHeadersDefaultCellStyle.BackColor = $script:stepBackground
+    $grid.ColumnHeadersDefaultCellStyle.ForeColor = $form.ForeColor
+    $grid.DefaultCellStyle.BackColor = $surface
+    $grid.DefaultCellStyle.ForeColor = $form.ForeColor
+    $grid.DefaultCellStyle.SelectionBackColor = $accent
+    $grid.DefaultCellStyle.SelectionForeColor = [Drawing.Color]::White
+    $grid.DefaultCellStyle.WrapMode = 'True'
+    $grid.AutoSizeRowsMode = 'AllCells'
+    foreach ($column in 'Requirement', 'Provided by', 'Required by mod', 'Status') {
+        $null = $grid.Columns.Add($column, $column)
+    }
+    $grid.Columns[3].FillWeight = 58
+    foreach ($requirement in $plan.Requirements) {
+        $row = $grid.Rows.Add([object[]]@($requirement.Master, $requirement.Provider, $requirement.RequiredBy, $requirement.Status))
+        $grid.Rows[$row].Cells[2].ToolTipText = $requirement.Plugin
+    }
+
+    $null = Add-ReviewControl Label 'Compatibility notes' 26 459 768 25
+    $notes = Add-ReviewControl ListBox '' 26 486 768 66
+    $notes.HorizontalScrollbar = $true
+    foreach ($note in $plan.Notes) { $null = $notes.Items.Add($note) }
+    if (!$plan.Notes.Count) { $null = $notes.Items.Add('No compatibility notes from this scan.') }
+    foreach ($list in $selectedList, $notes) {
+        $list.BackColor = $surface
+        $list.ForeColor = $form.ForeColor
+    }
+    $include = Add-ReviewControl CheckBox "Include required mods ($($plan.Added.Count) to add)" 26 558 500 27
+    $include.Checked = $plan.Added.Count -gt 0
+    $include.Enabled = $include.Checked
+
+    $back = Add-ReviewControl Button 'Back' 26 602 106 34
+    $back.DialogResult = 'Cancel'
+    $next = Add-ReviewControl Button 'Choose destination...' 606 601 188 38
+    $next.DialogResult = 'OK'
+    $next.FlatStyle = 'Flat'
+    $next.BackColor = $accent
+    $next.ForeColor = [Drawing.Color]::White
+    $review.CancelButton = $back
+    $review.AcceptButton = $next
+
+    try {
+        $choice = $review.ShowDialog($form)
+        $includeRequired = $include.Checked
+    } finally { $review.Dispose() }
+    if ($choice -ne 'OK') {
+        Set-GuidedStep 0
+        $status.Text = 'Review canceled. Your mod selection is ready to edit.'
+        return
+    }
+    $destination = Select-Folder 'Choose a destination outside the source modlist.'
+    if (!$destination) {
+        Set-GuidedStep 0
+        $status.Text = 'No destination selected. Review the selection to continue.'
+        return
+    }
+    if ($includeRequired) { $selected = $plan.Mods }
+    Start-Export $destination $section $selected
+}
+$export.Add_Click({
+    if (!$script:selectedNames.Count) {
+        $status.Text = 'Select at least one mod to export.'
+        return
+    }
+    $section = $script:sections[$separator.SelectedIndex]
+    $selected = @($script:sectionMods | Where-Object { $script:selectedNames.Contains($_.Name) })
+
+    $worker = [PowerShell]::Create()
+    try {
+        $allMods = @($script:sections | ForEach-Object { $_.Mods })
+        $null = $worker.AddScript({
+            param($ScriptPath, $Installed, $Selected, $Merged)
+            . $ScriptPath -CoreOnly
+            Get-DependencyPlan $Installed $Selected -Merged:$Merged
+        }).AddArgument($scriptFile).AddArgument($allMods).AddArgument($selected).AddArgument($format.SelectedIndex -eq 1)
+        $script:job = @{
+            Kind = 'Scan'; Worker = $worker; Handle = $worker.BeginInvoke()
+            Section = $section; Selected = $selected
+        }
+        foreach ($control in $controls) { $control.Enabled = $false }
+        Set-GuidedStep 1
+        $status.Text = 'Scanning for plugin dependencies...'
+        $metrics.Text = ''
+        $progress.Style = 'Marquee'
         $progress.Visible = $true
         $timer.Start()
     } catch {
