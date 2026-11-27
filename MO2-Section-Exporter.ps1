@@ -1,6 +1,6 @@
 param([switch]$CoreOnly)
 $ErrorActionPreference = 'Stop'
-$AppVersion = '0.1.3'
+$AppVersion = '0.1.8'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -20,7 +20,7 @@ function Get-Sections($Profile, $Mods) {
         }
         $path = Join-Path $Mods $name
         if (Test-Path -LiteralPath $path -PathType Container) {
-            $section.Mods.Add([pscustomobject]@{ Name = $name; Path = $path; Enabled = $enabled })
+            $section.Mods.Add([pscustomobject]@{ Name = $name; Path = $path; Enabled = $enabled; Section = $section.Name })
         }
     }
     if ($section.Mods.Count) { $section }
@@ -98,6 +98,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
     $manifest.format = if ($Merged) { 'merged' } else { 'individual' }
     try {
         $jobs = if ($Merged) {
+            $manifest.mergeWinners = [ordered]@{}
             $winningFiles = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
             foreach ($mod in $Selected) {
         $Cancellation.ThrowIfCancellationRequested()
@@ -105,6 +106,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
                 foreach ($file in $paths[$mod.Name]) {
                     $relative = $file.FullName.Substring($mod.Path.Length + 1).Replace('\', '/')
                     if ($relative -ieq 'meta.ini' -or $relative -match '(?i)\.mohidden(?:/|$)') { continue }
+                    if ($winningFiles.ContainsKey($relative)) { $manifest.mergeWinners[$relative] = $mod.Name }
                     $winningFiles[$relative] = [pscustomobject]@{ Relative = $relative; File = $file }
                 }
             }
@@ -122,7 +124,7 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
             foreach ($mod in $Selected) {
         $Cancellation.ThrowIfCancellationRequested()
                 $filename = $mod.Name + '.zip'
-                $manifest.mods += [ordered]@{ name = $mod.Name; archive = $filename; enabled = $mod.Enabled }
+                $manifest.mods += [ordered]@{ name = $mod.Name; archive = $filename; enabled = $mod.Enabled; section = $mod.Section }
                 $entries = foreach ($file in $paths[$mod.Name]) {
                     [pscustomobject]@{ Relative = $file.FullName.Substring($mod.Path.Length + 1).Replace('\', '/'); File = $file }
                 }
@@ -217,8 +219,18 @@ function Export-Section($Source, $Destination, $Section, $Selected, $Profile, $R
 }
 
 
-function Read-Masters($Path) {
-    $stream = [IO.File]::OpenRead($Path)
+function Read-Masters($Path, [IO.Stream]$ArchiveEntry) {
+    if ($ArchiveEntry) {
+        $source = [IO.BinaryReader]::new($ArchiveEntry)
+        try {
+            $prefix = $source.ReadBytes(24)
+            if ($prefix.Length -ne 24) { throw 'Truncated TES4 header' }
+            $length = [BitConverter]::ToUInt32($prefix, 4)
+            if ($length -gt 4MB) { throw 'TES4 header exceeds preview limit' }
+            $payload = $source.ReadBytes([int]$length)
+            $stream = [IO.MemoryStream]::new([byte[]]($prefix + $payload))
+        } finally { $source.Dispose() }
+    } else { $stream = [IO.File]::OpenRead($Path) }
     $reader = [IO.BinaryReader]::new($stream)
     try {
         if ([Text.Encoding]::ASCII.GetString($reader.ReadBytes(4)) -ne 'TES4') { throw 'Invalid TES4 header' }
@@ -392,33 +404,161 @@ function Assert-ImportName([string]$Name) {
     }
 }
 
-function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName, [switch]$Preview) {
+function Get-DestinationReview($ProfilePath, $Mods, $IncomingFiles, $IncomingPlugins, $References) {
+    $destPlugins = @{}
+    $overrides = @{}
+    $base = @($BaseGameMasters + '_ResourcePack.esl')
+    $pluginState = @{}
+    $pluginsFile = Join-Path (Split-Path $ProfilePath) 'plugins.txt'
+    if (Test-Path -LiteralPath $pluginsFile -PathType Leaf) {
+        foreach ($line in [IO.File]::ReadAllLines($pluginsFile)) {
+            if ($line -match '^(\*?)([^#].+\.(?:esp|esm|esl))$') {
+                $pluginState[$Matches[2]] = $Matches[1] -eq '*'
+            }
+        }
+    }
+    foreach ($line in [IO.File]::ReadAllLines($ProfilePath)) {
+        if ($line -notmatch '^\+(.+)$') { continue }
+        $name = $Matches[1]
+        if ($name -match '[\\/:]' -or $name -in '.', '..') { continue }
+        $path = Join-Path $Mods $name
+        $directory = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+        if (!$directory -or !$directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+        foreach ($file in Get-ChildItem -LiteralPath $path -File -Recurse) {
+            $relative = $file.FullName.Substring($path.Length + 1).Replace('\','/')
+            if ($relative -notmatch '/' -and $relative -match '\.(esp|esm|esl)$' -and !$destPlugins.ContainsKey($relative)) {
+                $destPlugins[$relative] = $name
+            }
+            if ($IncomingFiles.ContainsKey($relative) -and !$overrides.ContainsKey($relative)) {
+                $overrides[$relative] = $name
+            }
+        }
+    }
+    $dependencies = foreach ($reference in $References) {
+        $master = $reference.Master
+        $status = if ($master -in $base) { 'Base game' }
+        elseif ($IncomingPlugins.ContainsKey($master)) { 'Included; check plugin activation' }
+        elseif ($destPlugins.ContainsKey($master)) {
+            if ($pluginState[$master]) { 'Active in destination' } else { 'Destination mod present; check plugin activation' }
+        } else { 'Missing from enabled mods and bundle' }
+        "$master | $status | required by $($reference.Plugin)"
+    }
+    $conflicts = foreach ($relative in @($overrides.Keys | Sort-Object)) {
+        "$relative | $($IncomingFiles[$relative]) overrides $($overrides[$relative])"
+    }
+    [pscustomobject]@{ Dependencies = @($dependencies | Sort-Object -Unique); Conflicts = @($conflicts) }
+}
+
+function Get-DirectFiles($Source) {
+    Assert-OrdinaryPath $Source
+    $items = @(Get-ChildItem -LiteralPath $Source -Force -Recurse)
+    if ($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -First 1) {
+        throw "Direct transfer does not support links or junctions in $Source."
+    }
+    $items | Where-Object { !$_.PSIsContainer -and !(Test-BaseGameFile $_.FullName.Substring($Source.Length + 1)) }
+}
+
+function Copy-DirectMod($Source, $Destination) {
+    $files = @(Get-DirectFiles $Source)
+    if (!$files.Count) { throw "No mod files to copy from $Source." }
+    $excluded = @(Get-ChildItem -LiteralPath $Source -Force -File | Where-Object { Test-BaseGameFile $_.Name })
+    $arguments = @($Source, $Destination, '/E', '/XJ', '/R:0', '/W:0', '/MT:8', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
+    if ($excluded.Count) { $arguments += '/XF'; $arguments += @($excluded.FullName) }
+    $output = & (Join-Path $env:WINDIR 'System32\robocopy.exe') @arguments
+    if ($LASTEXITCODE -notin 0,1) { throw "Robocopy returned $LASTEXITCODE for $Source. $($output -join ' ')" }
+    foreach ($file in $files) {
+        $copy = Get-Item -LiteralPath (Join-Path $Destination $file.FullName.Substring($Source.Length + 1))
+        if ($copy.Length -ne $file.Length) { throw "Incomplete copy: $($file.Name)" }
+    }
+    foreach ($file in $excluded) {
+        if (Test-Path -LiteralPath (Join-Path $Destination $file.Name)) { throw "Stock file was copied: $($file.Name)" }
+    }
+}
+
+function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName, [switch]$Preview, [switch]$KeepSections, [ValidateSet('Block','Skip','Rename')][string]$DuplicateAction = 'Block', $DirectMods) {
     Assert-ImportName $SeparatorName
     Assert-ImportName $ProfileName
     $profile = Join-Path (Join-Path $Target 'profiles') $ProfileName
     $mods = Join-Path $Target 'mods'
-    foreach ($path in $Package, $profile, $mods) { Assert-OrdinaryPath $path }
-    $manifestPath = Join-Path $Package 'section.json'
+    foreach ($path in $profile, $mods) { Assert-OrdinaryPath $path }
     $profilePath = Join-Path $profile 'modlist.txt'
-    Assert-OrdinaryPath $manifestPath
     Assert-OrdinaryPath $profilePath
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged' -or !@($manifest.mods).Count) {
-        throw 'Choose an export folder with a supported section.json.'
-    }
-    $separator = $SeparatorName + '_separator'
-    $jobs = @(if ($manifest.format -eq 'merged') {
-        [pscustomobject]@{ Name = $SeparatorName + ' (Merged)'; Archive = [string]$manifest.archive; Enabled = $true }
+    if ($DirectMods) {
+        $manifest = [pscustomobject]@{ format = 'individual' }
+        $separator = $SeparatorName + '_separator'
+        $jobs = @(foreach ($mod in $DirectMods) {
+            Assert-OrdinaryPath $mod.Path
+            if ((Test-Within $mod.Path $mods) -or (Test-Within $mods $mod.Path)) {
+                throw 'Choose a different MO2 installation for direct transfer.'
+            }
+            [pscustomobject]@{Name=$mod.Name; DirectPath=$mod.Path; Enabled=$mod.Enabled; SourceSection=$mod.Section}
+        })
     } else {
-        foreach ($mod in $manifest.mods) {
-            if ($mod.enabled -isnot [bool]) { throw 'Invalid enabled state in section.json.' }
-            [pscustomobject]@{ Name = [string]$mod.name; Archive = [string]$mod.archive; Enabled = $mod.enabled }
+        Assert-OrdinaryPath $Package
+        $manifestPath = Join-Path $Package 'section.json'
+        $profilePath = Join-Path $profile 'modlist.txt'
+        Assert-OrdinaryPath $manifestPath
+        Assert-OrdinaryPath $profilePath
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged' -or !@($manifest.mods).Count) {
+            throw 'Choose an export folder with a supported section.json.'
         }
+        $separator = $SeparatorName + '_separator'
+        $jobs = @(if ($manifest.format -eq 'merged') {
+            [pscustomobject]@{ Name = $SeparatorName + ' (Merged)'; Archive = [string]$manifest.archive; Enabled = $true }
+        } else {
+            foreach ($mod in $manifest.mods) {
+                if ($mod.enabled -isnot [bool]) { throw 'Invalid enabled state in section.json.' }
+                [pscustomobject]@{ Name = [string]$mod.name; Archive = [string]$mod.archive; Enabled = $mod.enabled; SourceSection = [string]$mod.section }
+            }
+        })
+    
+    }
+    $existing = [IO.File]::ReadAllLines($profilePath)
+    $occupied = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in $existing) { if ($line -match '^[+-](.+)$') { $null = $occupied.Add($Matches[1]) } }
+    foreach ($item in Get-ChildItem -LiteralPath $mods -Force) { $null = $occupied.Add($item.Name) }
+    $decisions = [Collections.Generic.List[string]]::new()
+    $jobs = @(foreach ($job in $jobs) {
+        Assert-ImportName $job.Name
+        if ($DuplicateAction -ne 'Block' -and $occupied.Contains($job.Name)) {
+            if ($DuplicateAction -eq 'Skip') { $decisions.Add("Skipped $($job.Name); existing copy kept."); continue }
+            $name = $job.Name
+            $suffix = 1
+            do {
+                $job.Name = if ($suffix -eq 1) { "$name (Imported)" } else { "$name (Imported $suffix)" }
+                $suffix++
+            } while ($occupied.Contains($job.Name))
+            $decisions.Add("$name imported as $($job.Name).")
+        }
+        $null = $occupied.Add($job.Name)
+        $job
     })
+    if (!$jobs.Count) { throw 'No incoming mods remain after skipping duplicates.' }
+    $canKeep = $manifest.format -eq 'individual' -and @($jobs | Where-Object SourceSection | Select-Object -ExpandProperty SourceSection -Unique).Count -gt 1
+    $layout = [Collections.Generic.List[object]]::new()
+    $separatorNames = [Collections.Generic.List[string]]::new()
+    if ($KeepSections -and $canKeep) {
+        $previous = $null
+        foreach ($job in $jobs) {
+            $group = if ($job.SourceSection) { $job.SourceSection } else { 'Ungrouped' }
+            if ($group -ne $previous) {
+                $name = "$SeparatorName - "+$group+'_separator'
+                $separatorNames.Add($name)
+                $layout.Add('-'+$name)
+                $previous = $group
+            }
+            $layout.Add($(if ($job.Enabled) { '+' } else { '-' }) + $job.Name)
+        }
+    } else {
+        $separatorNames.Add($separator)
+        $layout.Add('-'+$separator)
+        foreach ($job in $jobs) { $layout.Add($(if ($job.Enabled) { '+' } else { '-' }) + $job.Name) }
+    }
     $existing = [IO.File]::ReadAllLines($profilePath)
     $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $collisions = [Collections.Generic.List[string]]::new()
-    foreach ($name in @($separator) + @($jobs.Name)) {
+    foreach ($name in @($separatorNames.ToArray()) + @($jobs.Name)) {
         Assert-ImportName $name
         if (!$names.Add($name) -or (Test-Path -LiteralPath (Join-Path $mods $name)) -or
             ($existing -contains "+$name") -or ($existing -contains "-$name")) {
@@ -429,8 +569,32 @@ function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName, [switch
         throw "A mod or separator already uses this name: $($collisions -join ', ')."
     }
     [long]$unpackedBytes = 0
+    $incomingFiles = @{}
+    $incomingPlugins = @{}
+    $references = [Collections.Generic.List[object]]::new()
+    $reviewNotes = [Collections.Generic.List[string]]::new()
     foreach ($job in $jobs) {
         if ($job.Name.EndsWith('_separator', [StringComparison]::OrdinalIgnoreCase)) { throw "Invalid mod name: $($job.Name)" }
+        if ($job.DirectPath) {
+            if ($Preview) {
+                foreach ($file in Get-DirectFiles $job.DirectPath) {
+                    $unpackedBytes += $file.Length
+                    if (!$job.Enabled) { continue }
+                    $relative = $file.FullName.Substring($job.DirectPath.Length + 1).Replace('\','/')
+                    if ($relative -ieq 'meta.ini' -or $relative -match '\.mohidden(?:/|$)') { continue }
+                    $incomingFiles[$relative] = $job.Name
+                    if ($relative -match '^[^/]+\.(esp|esm|esl)$') {
+                        $incomingPlugins[$relative] = $job.Name
+                        try {
+                            foreach ($master in @(Read-Masters $file.FullName)) {
+                                $references.Add([pscustomobject]@{Master=$master;Plugin=$relative;Provider=$job.Name})
+                            }
+                        } catch { $reviewNotes.Add("Could not read plugin masters for $relative.") }
+                    }
+                }
+            }
+            continue
+        }
         Assert-ImportName $job.Archive
         if ([IO.Path]::GetExtension($job.Archive) -ine '.zip') { throw 'Expected a ZIP archive.' }
         $archive = Join-Path $Package $job.Archive
@@ -445,16 +609,41 @@ function Get-ImportPlan($Package, $Target, $ProfileName, $SeparatorName, [switch
             $job.Hash = [string]$checksum.Value
         }
         if ($Preview) {
-            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            $stream = [IO.File]::OpenRead($archive)
             try {
-                foreach ($entry in $zip.Entries) { $unpackedBytes += $entry.Length }
-            } finally { $zip.Dispose() }
+                if ($job.Hash) {
+                    if ((Get-FileHash -InputStream $stream -Algorithm SHA256).Hash -ine $job.Hash) { throw "SHA-256 mismatch for $($job.Name)." }
+                    $stream.Position = 0
+                }
+                $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Read, $true)
+                try {
+                    foreach ($entry in $zip.Entries) {
+                        $unpackedBytes += $entry.Length
+                        if (!$job.Enabled -or !$entry.Name) { continue }
+                        $relative = $entry.FullName.Replace('\','/')
+                        if ($relative -ieq 'meta.ini' -or $relative -match '\.mohidden(?:/|$)') { continue }
+                        $incomingFiles[$relative] = $job.Name
+                        if ($relative -match '^[^/]+\.(esp|esm|esl)$') {
+                            $incomingPlugins[$relative] = $job.Name
+                            try {
+                                $pluginRefs = @(Read-Masters -ArchiveEntry $entry.Open())
+                                foreach ($master in $pluginRefs) { $references.Add([pscustomobject]@{Master=$master;Plugin=$relative;Provider=$job.Name}) }
+                            } catch { $reviewNotes.Add("Could not read plugin masters for $relative in $($job.Name).") }
+                        }
+                    }
+                } finally { $zip.Dispose() }
+            } finally { $stream.Dispose() }
         }
         $job.Archive = $archive
     }
+    $review = if ($Preview) { Get-DestinationReview $profilePath $mods $incomingFiles $incomingPlugins @($references.ToArray() | Where-Object { $incomingPlugins[$_.Plugin] -eq $_.Provider }) }
+    $winners = if ($Preview -and $manifest.mergeWinners) {
+        @($manifest.mergeWinners.PSObject.Properties | ForEach-Object { "$($_.Name) | $($_.Value)" })
+    }
     [pscustomobject]@{
+        Decisions = $decisions.ToArray(); Review = $review; MergeWinners = @($winners | Where-Object { $_ }); ReviewNotes = $reviewNotes.ToArray()
         Mods = $mods; Profile = $profilePath; Existing = $existing; Separator = $separator; Jobs = $jobs
-        Collisions = @($collisions.ToArray()); UnpackedBytes = $unpackedBytes
+        Collisions = @($collisions.ToArray()); UnpackedBytes = $unpackedBytes; CanKeepSections = $canKeep; Layout = $layout.ToArray(); Separators = $separatorNames.ToArray()
         FreeBytes = (Get-Item -LiteralPath $mods).PSDrive.Free; HasChecksums = $null -ne $manifest.sha256
     }
 }
@@ -465,9 +654,9 @@ function Assert-Mo2Closed {
     }
 }
 
-function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report) {
+function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report, [switch]$KeepSections, [ValidateSet('Block','Skip','Rename')][string]$DuplicateAction = 'Block', $DirectMods) {
     Assert-Mo2Closed
-    $plan = Get-ImportPlan $Package $Target $ProfileName $SeparatorName
+    $plan = Get-ImportPlan $Package $Target $ProfileName $SeparatorName -KeepSections:$KeepSections -DuplicateAction $DuplicateAction -DirectMods $DirectMods
     $token = [guid]::NewGuid().ToString('N')
     $stage = Join-Path $plan.Mods ('.mo2-import-' + $token)
     $newProfile = $plan.Profile + '.' + $token + '.tmp'
@@ -479,6 +668,11 @@ function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report
             & $Report "Extracting $($job.Name)..."
             $modFolder = Join-Path $stage $job.Name
             $null = New-Item -Path $modFolder -ItemType Directory
+            if ($job.DirectPath) {
+                & $Report "Copying $($job.Name)..."
+                Copy-DirectMod $job.DirectPath $modFolder
+                continue
+            }
             $archiveStream = [IO.File]::OpenRead($job.Archive)
             try {
                 if ($job.Hash) {
@@ -512,12 +706,13 @@ function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report
                 } finally { $zip.Dispose() }
             } finally { $archiveStream.Dispose() }
         }
-        $separatorFolder = Join-Path $stage $plan.Separator
-        $null = New-Item -Path $separatorFolder -ItemType Directory
-        [IO.File]::WriteAllLines((Join-Path $separatorFolder 'meta.ini'), [string[]]@('[General]','modid=0','category="-1,"'))
-        $lines = @($plan.Jobs | ForEach-Object { $(if ($_.Enabled) { '+' } else { '-' }) + $_.Name })
+        foreach ($separator in $plan.Separators) {
+            $separatorFolder = Join-Path $stage $separator
+            $null = New-Item -Path $separatorFolder -ItemType Directory
+            [IO.File]::WriteAllLines((Join-Path $separatorFolder 'meta.ini'), [string[]]@('[General]','modid=0','category="-1,"'))
+        }
+        $lines = $plan.Layout
         [array]::Reverse($lines)
-        $lines += '-' + $plan.Separator
         $start = 0
         while ($start -lt $plan.Existing.Count -and $plan.Existing[$start] -match '^(#|\s*$)') { $start++ }
         $combined = @($plan.Existing | Select-Object -First $start) + $lines + @($plan.Existing | Select-Object -Skip $start)
@@ -525,7 +720,7 @@ function Import-Section($Package, $Target, $ProfileName, $SeparatorName, $Report
         Assert-Mo2Closed
         $current = [IO.File]::ReadAllLines($plan.Profile)
         if (($current -join "`n") -cne ($plan.Existing -join "`n")) { throw 'The destination profile changed during import.' }
-        foreach ($name in @($plan.Separator) + @($plan.Jobs.Name)) {
+        foreach ($name in @($plan.Separators) + @($plan.Jobs.Name)) {
             $output = Join-Path $plan.Mods $name
             [IO.Directory]::Move((Join-Path $stage $name), $output)
             $published.Add($name)
@@ -598,11 +793,50 @@ Windows default|Windows ??|Windows ????????|Predeterminado de Windows|??????? Wi
     if ($parts.Count -ne 10) { throw 'Invalid translation row.' }
     $script:translations[$parts[0]] = $parts
 }
+foreach ($line in ('More sections...|????.|?? ??????.|M�s secciones.|????? ????.|Plus de sections.|??? ?????.|Mais se��es.|?????? ???????.|Bagian lainnya.
+Apply|??|???? ????|Aplicar|?????|Appliquer|??????? ????|Aplicar|?????????|Terapkan
+Recreate original separators|??????|??? ?????? ??? ?????|Recrear separadores originales|????? ????? ??????? ???????|Recr�er les s�parateurs d''origine|??? ?????? ??????? ???? ????|Recriar separadores originais|?????????? ???????? ???????????|Buat ulang pemisah asli
+Preview.|??.|???????????.|Vista previa.|??????.|Aper�u.|??????????.|Pr�via.|????????????.|Pratinjau.
+Import preview|????|???? ?? ???????????|Vista previa de importaci�n|?????? ?????????|Aper�u de l''importation|??????? ??????????|Pr�via da importa��o|???????????? ???????|Pratinjau impor
+Checking selected mod files...|??????????.|???? ?? ??? ??????? ????? ?? ??? ???.|Comprobando archivos seleccionados.|???? ??? ????? ??????? ???????.|V�rification des fichiers s�lectionn�s.|????????? ?? ???? ??????? ??? ?????.|Verificando arquivos dos mods selecionados.|???????? ????????? ?????? ?????.|Memeriksa file mod yang dipilih.
+Scanning for plugin dependencies...|?????????.|?????? ?????????? ???? ?? ??? ???.|Buscando dependencias de plugins.|???? ????? ?? ?????? ????????.|Recherche des d�pendances des plugins.|????????? ???????? ????? ?????.|Buscando depend�ncias dos plugins.|????? ???????????? ????????.|Memindai dependensi plugin.
+Canceling export...|??????.|??????? ???? ???? ?? ??? ??.|Cancelando la exportaci�n.|???? ????? ???????.|Annulation de l''exportation.|??????? ????? ??? ?????.|Cancelando a exporta��o.|?????? ????????.|Membatalkan ekspor.
+Export stopped.|??????|??????? ??? ????|Exportaci�n detenida.|???? ???????.|Exportation interrompue.|??????? ???? ???????|Exporta��o interrompida.|??????? ??????????.|Ekspor dihentikan.
+Select at least one mod to export.|??????????????|??????? ?? ??? ?? ?? ?? ?? ??? ??????|Selecciona al menos un mod para exportar.|???? ????? ?????? ??? ????? ???????.|S�lectionnez au moins un mod � exporter.|???????? ???? ????? ???? ?? ???? ????|Selecione pelo menos um mod para exportar.|???????? ???? ?? ???? ??? ??? ????????.|Pilih setidaknya satu mod untuk diekspor.
+Checking import files...|????????.|???? ??????? ????? ?? ??? ???.|Comprobando archivos de importaci�n.|???? ??? ????? ?????????.|V�rification des fichiers � importer.|??????? ???? ??????? ??? ?????.|Verificando arquivos da importa��o.|???????? ?????? ???????.|Memeriksa file impor.
+Close Mod Organizer 2 before importing.|???? Mod Organizer 2?|???? ?? ???? Mod Organizer 2 ??? ?????|Cierra Mod Organizer 2 antes de importar.|???? Mod Organizer 2 ??? ?????????.|Fermez Mod Organizer 2 avant l''importation.|??????? ??? Mod Organizer 2 ???? ?????|Feche o Mod Organizer 2 antes de importar.|???????? Mod Organizer 2 ????? ????????.|Tutup Mod Organizer 2 sebelum mengimpor.
+Compressing {0}|???? {0}|{0} ???????? ???? ?? ??? ??|Comprimiendo {0}|???? ??? {0}|Compression de {0}|{0} ??????? ?????|Compactando {0}|?????? {0}|Mengompresi {0}
+Verifying {0}|???? {0}|{0} ???????? ???? ?? ??? ??|Verificando {0}|???? ?????? ?? {0}|V�rification de {0}|{0} ????? ?????|Verificando {0}|???????? {0}|Memverifikasi {0}
+Extracting {0}|???? {0}|{0} ?????? ?? ??? ??|Extrayendo {0}|???? ??????? {0}|Extraction de {0}|{0} ???????? ??? ?????|Extraindo {0}|?????????? {0}|Mengekstrak {0}
+The destination has insufficient free space.|????????????|?????? ?? ???????? ???? ??? ???? ???|El destino no tiene suficiente espacio libre.|??????? ????? ?? ?????? ??? ?????.|L''espace libre est insuffisant dans la destination.|???????? ???????? ???? ?????? ????|O destino n�o tem espa�o livre suficiente.|? ????? ?????????? ???????????? ?????????? ?????.|Ruang kosong di tujuan tidak cukup.
+Older export. ZIP checksums are unavailable.|????,? ZIP ????|?????? ???????? ZIP ????? ?????? ???? ????|Exportaci�n antigua. No hay sumas de verificaci�n ZIP.|????? ????. ??? ?????? ?????? ZIP ??? ??????.|Ancienne exportation. Sommes de contr�le ZIP indisponibles.|?????? ???????? ZIP ?????? ????|Exporta��o antiga. Checksums dos ZIPs indispon�veis.|?????? ???????. ??????????? ????? ZIP ??????????.|Ekspor lama. Checksum ZIP tidak tersedia.
+ZIP checksums will be verified during import.|?????? ZIP ????|???? ?? ????? ZIP ????? ????? ???????|Se verificar�n las sumas de los ZIP al importar.|???? ?????? ?? ??? ZIP ????? ?????????.|Les sommes de contr�le ZIP seront v�rifi�es � l''importation.|??????? ???? ZIP ?????? ????? ????|Os checksums dos ZIPs ser�o verificados na importa��o.|??????????? ????? ZIP ????? ????????? ??? ???????.|Checksum ZIP akan diperiksa saat impor.
+Name collisions|????|??? ?????|Conflictos de nombres|????? ???????|Conflits de noms|????? ?????|Conflitos de nomes|????????? ????|Konflik nama
+Destination profile|??????|?????? ?????????|Perfil de destino|??? ????? ??????|Profil de destination|??????? ????????|Perfil de destino|??????? ???????|Profil tujuan
+New separators|????|?? ??????|Separadores nuevos|??????? ???????|Nouveaux s�parateurs|???? ??????|Novos separadores|????? ???????????|Pemisah baru
+Mods|??|???|Mods|???????|Mods|??|Mods|????|Mod
+Estimated extraction size|??????|???????? ????????? ????|Tama�o estimado de extracci�n|????? ???????? ??? ?????????|Taille d''extraction estim�e|?????????? ???????? ????|Tamanho estimado da extra��o|????????? ????? ??????????|Perkiraan ukuran ekstraksi
+Destination free space|??????|?????? ?? ???? ???|Espacio libre en el destino|??????? ????? ?? ??????|Espace libre dans la destination|???????? ???? ??????|Espa�o livre no destino|????????? ????? ? ????? ??????????|Ruang kosong di tujuan' -split '\r?\n')) {
+    $parts = $line.Split('|')
+    if ($parts.Count -ne 10) { throw 'Invalid translation row.' }
+    $script:translations[$parts[0]] = $parts
+}
+$script:translations['Export & import'] = @(
+    'Export & import','?????','??????? ?? ????','Exportar e importar','??????? ??????????',
+    'Exporter et importer','??????? ? ??????','Exportar e importar','??????? ? ??????','Ekspor dan impor'
+)
 function Get-UiText([string]$text) {
     $index = [array]::IndexOf($script:codes, $script:language)
     if ($index -gt 0 -and $script:translations.ContainsKey($text)) { return $script:translations[$text][$index] }
     $text
 }
+function Get-UiMessage([string]$Message) {
+    if ($Message -match '^(Compressing|Verifying|Extracting) (.+?)(?:\.\.\.)?$') {
+        return (Get-UiText ($Matches[1] + ' {0}')) -f $Matches[2]
+    }
+    Get-UiText $Message
+}
+
 function Update-ControlLanguage($window) {
     $window.RightToLeft = if ($script:language -eq 'ar') { 'Yes' } else { 'No' }
     foreach ($control in $window.Controls) {
@@ -665,7 +899,9 @@ $null = Add-Control Label 'Profile' 26 215 360 23
 $profile = Add-Control ComboBox '' 26 240 366 30
 $profile.DropDownStyle = 'DropDownList'
 $null = Add-Control Label 'Separator' 412 215 382 23
-$separator = Add-Control ComboBox '' 412 240 382 30
+$separator = Add-Control ComboBox '' 412 240 243 30
+$chooseSections = Add-Control Button 'More sections...' 666 236 128 36
+$chooseSections.Anchor = 'Top,Right'
 $separator.DropDownStyle = 'DropDownList'
 
 $selection = Add-Control Label 'Mods' 26 288 475 27
@@ -680,7 +916,7 @@ $checks.CheckOnClick = $true
 $checks.HorizontalScrollbar = $true
 $checks.BorderStyle = 'FixedSingle'
 
-$null = Add-Control Label 'Export format' 26 586 118 24
+$formatLabel = Add-Control Label 'Export format' 26 586 118 24
 $format = Add-Control ComboBox '' 155 581 300 31
 $format.DropDownStyle = 'DropDownList'
 $null = $format.Items.Add('Individual ZIPs')
@@ -723,7 +959,7 @@ $export.BackColor = $accent
 $export.ForeColor = [Drawing.Color]::White
 
 $reviewToggle.Add_CheckedChanged({
-    $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } else { Get-UiText 'Export ZIPs...' }
+    $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } elseif ($script:exportThenImport) { Get-UiText 'Choose destination...' } else { Get-UiText 'Export ZIPs...' }
 })
 foreach ($control in $install,$search,$separator) { $control.Anchor = 'Top,Left,Right' }
 foreach ($control in $theme,$browse,$all,$none) { $control.Anchor = 'Top,Right' }
@@ -738,7 +974,7 @@ $cancelExport.Add_Click({
     if ($script:job -and $script:job.Cancellation) {
         $script:job.Cancellation.Cancel()
         $cancelExport.Enabled = $false
-        $status.Text = 'Canceling export...'
+        $status.Text = Get-UiText 'Canceling export...'
     }
 })
 $script:darkMode = $false
@@ -785,7 +1021,7 @@ $script:refreshingList = $false
 
 function Update-Selection {
     $count = $script:selectedNames.Count
-    $selection.Text = "Mods  |  $count of $($script:sectionMods.Count) selected  |  $($script:visibleMods.Count) shown"
+    $selection.Text = "$(Get-UiText 'Mods')  |  $count of $($script:sectionMods.Count) selected  |  $($script:visibleMods.Count) shown"
     $export.Enabled = $count -gt 0
     $all.Enabled = $script:visibleMods.Count -gt $checks.CheckedItems.Count
     $none.Enabled = $checks.CheckedItems.Count -gt 0
@@ -978,17 +1214,57 @@ $profile.Add_SelectedIndexChanged({
     foreach ($section in $script:sections) { $null = $separator.Items.Add($section.Name) }
     if ($separator.Items.Count) { $separator.SelectedIndex = 0 }
 })
-$separator.Add_SelectedIndexChanged({
-    $script:sectionMods = @()
-    $script:selectedNames.Clear()
-    if ($separator.SelectedIndex -ge 0) {
-        $section = $script:sections[$separator.SelectedIndex]
-        $script:sectionMods = @($section.Mods.ToArray())
-        foreach ($mod in $script:sectionMods) { $null = $script:selectedNames.Add($mod.Name) }
+$script:sectionIndexes = @()
+function Set-SectionSelection($Indexes, [switch]$RetainSelection) {
+    $previous = @($script:sectionMods | ForEach-Object Name)
+    $script:sectionIndexes = @($Indexes | Sort-Object -Unique)
+    $script:sectionMods = @(foreach ($index in $script:sectionIndexes) { $script:sections[$index].Mods.ToArray() })
+    if ($RetainSelection) {
+        $names = @($script:sectionMods | ForEach-Object Name)
+        $script:selectedNames.RemoveWhere([Predicate[string]]{ param($name); $name -notin $names }) | Out-Null
+    } else { $script:selectedNames.Clear() }
+    foreach ($mod in $script:sectionMods) {
+        if (!$RetainSelection -or $mod.Name -notin $previous) { $null = $script:selectedNames.Add($mod.Name) }
     }
-    $search.Clear()
+    $chooseSections.Text = if ($script:sectionIndexes.Count -gt 1) { "$($script:sectionIndexes.Count) selected" } else { Get-UiText 'More sections...' }
     Refresh-ModList
-    $status.Text = 'Choose the mods and ZIP format, then review the dependencies.'
+}
+$separator.Add_SelectedIndexChanged({
+    if ($separator.SelectedIndex -lt 0) { Set-SectionSelection @(); return }
+    Set-SectionSelection @($separator.SelectedIndex)
+    $search.Clear()
+})
+$chooseSections.Add_Click({
+    if (!$script:sections.Count) { return }
+    $dialog = New-Object Windows.Forms.Form
+    $dialog.Text = Get-UiText 'More sections...'
+    $dialog.ClientSize = New-Object Drawing.Size(560,440)
+    $dialog.MinimumSize = $dialog.Size
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.BackColor = $form.BackColor
+    $dialog.ForeColor = $form.ForeColor
+    $dialog.Font = $form.Font
+    $items = New-Object Windows.Forms.CheckedListBox
+    $items.SetBounds(16,16,528,365)
+    $items.Anchor = 'Top,Bottom,Left,Right'
+    $items.CheckOnClick = $true
+    $items.BackColor = $surface
+    $items.ForeColor = $form.ForeColor
+    for ($i=0; $i -lt $script:sections.Count; $i++) {
+        $null = $items.Items.Add($script:sections[$i].Name, $i -in $script:sectionIndexes)
+    }
+    $dialog.Controls.Add($items)
+    $done = New-Object Windows.Forms.Button
+    $done.Text = Get-UiText 'Apply'
+    $done.DialogResult = 'OK'
+    $done.SetBounds(414,391,130,34)
+    $done.Anchor = 'Bottom,Right'
+    $dialog.Controls.Add($done)
+    try {
+        if ($dialog.ShowDialog($form) -eq 'OK' -and $items.CheckedIndices.Count) {
+            Set-SectionSelection @($items.CheckedIndices) -RetainSelection
+        }
+    } finally { $dialog.Dispose() }
 })
 $browse.Add_Click({
     $path = Select-Folder 'Choose the folder containing ModOrganizer.ini, mods and profiles.'
@@ -1002,7 +1278,7 @@ $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 150
 $script:job = $null
 $scriptFile = $PSCommandPath
-$controls = @($install, $browse, $profile, $separator, $checks, $export, $all, $none, $format, $search, $reviewToggle)
+$controls = @($install, $browse, $profile, $separator, $checks, $export, $all, $none, $format, $search, $reviewToggle, $chooseSections)
 $form.Add_FormClosing({
     param($sender, $eventArgs)
     if ($script:job) {
@@ -1041,7 +1317,7 @@ $timer.Add_Tick({
             $job.Bytes = [long]$Matches[1]
             $job.Total = [long]$Matches[2]
         } else {
-            $status.Text = $message
+            $status.Text = Get-UiMessage $message
         }
     }
     $elapsed = $job.Clock.Elapsed
@@ -1063,7 +1339,7 @@ $timer.Add_Tick({
         [void][Windows.Forms.MessageBox]::Show($form, "Export complete.$([Environment]::NewLine)$result", $form.Text)
     } catch {
         Set-GuidedStep 0
-        $status.Text = if ($job.Cancellation.IsCancellationRequested) { 'Export canceled. Your selection is ready to edit.' } else { 'Export stopped.' }
+        $status.Text = if ($job.Cancellation.IsCancellationRequested) { 'Export canceled. Your selection is ready to edit.' } else { Get-UiText 'Export stopped.' }
         if ($job.Cancellation.IsCancellationRequested) {
             $metrics.Text = $_.Exception.Message
         } else {
@@ -1081,6 +1357,11 @@ $timer.Add_Tick({
     }
 })
 function Start-Export($destination, $section, $selected) {
+    if ($script:exportThenImport) {
+        $script:pendingDirect = @{ Mods = $selected; Section = $section.Name }
+        $form.DialogResult = 'OK'
+        return
+    }
     $cancellation = [Threading.CancellationTokenSource]::new()
     $queue = [Collections.Concurrent.ConcurrentQueue[string]]::new()
     $worker = [PowerShell]::Create()
@@ -1100,7 +1381,7 @@ function Start-Export($destination, $section, $selected) {
         $cancelExport.Enabled = $true
         $cancelExport.Visible = $true
         Set-GuidedStep 2
-        $status.Text = 'Checking selected mod files...'
+        $status.Text = Get-UiText 'Checking selected mod files...'
         $progress.Value = 0
         $metrics.Text = ''
         $progress.Visible = $true
@@ -1212,7 +1493,7 @@ function Show-DependencyReview($plan, $selected, $section) {
         $status.Text = 'Review canceled. Your mod selection is ready to edit.'
         return
     }
-    $destination = Get-ExportDestination $form ([string]$install.SelectedItem)
+    $destination = if ($script:exportThenImport) { 'direct' } else { Get-ExportDestination $form ([string]$install.SelectedItem) }
     if (!$destination) {
         Set-GuidedStep 0
         $status.Text = 'No destination selected. Review the selection to continue.'
@@ -1223,14 +1504,14 @@ function Show-DependencyReview($plan, $selected, $section) {
 }
 $export.Add_Click({
     if (!$script:selectedNames.Count) {
-        $status.Text = 'Select at least one mod to export.'
+        $status.Text = Get-UiText 'Select at least one mod to export.'
         return
     }
-    $section = $script:sections[$separator.SelectedIndex]
+    $section = if ($script:sectionIndexes.Count -eq 1) { $script:sections[$script:sectionIndexes[0]] } else { [pscustomobject]@{Name = 'Selected sections'} }
     $selected = @($script:sectionMods | Where-Object { $script:selectedNames.Contains($_.Name) })
 
     if (!$reviewToggle.Checked) {
-        $destination = Get-ExportDestination $form ([string]$install.SelectedItem)
+        $destination = if ($script:exportThenImport) { 'direct' } else { Get-ExportDestination $form ([string]$install.SelectedItem) }
         if ($destination) { Start-Export $destination $section $selected }
         return
     }
@@ -1248,7 +1529,7 @@ $export.Add_Click({
         }
         foreach ($control in $controls) { $control.Enabled = $false }
         Set-GuidedStep 1
-        $status.Text = 'Scanning for plugin dependencies...'
+        $status.Text = Get-UiText 'Scanning for plugin dependencies...'
         $metrics.Text = ''
         $progress.Style = 'Marquee'
         $progress.Visible = $true
@@ -1260,11 +1541,11 @@ $export.Add_Click({
 })
 
 
-function Show-ImportWindow {
+function Show-ImportWindow([string]$InitialPackage, $DirectMods, [string]$DirectSection) {
     $w = New-Object Windows.Forms.Form
     $w.RightToLeft = $form.RightToLeft
     $w.Text = Get-UiText 'Import section'
-    $w.ClientSize = New-Object Drawing.Size(740, 460)
+    $w.ClientSize = New-Object Drawing.Size(740, 496)
     $w.StartPosition = 'CenterScreen'
     $w.Font = $form.Font
     $w.BackColor = $form.BackColor
@@ -1295,16 +1576,24 @@ function Show-ImportWindow {
     $targetProfile.DropDownStyle = 'DropDownList'
     $null = Add-Field Label 'New separator name' 380 222 333 23
     $newSeparator = Add-Field TextBox '' 380 248 333 30
-    $statusImport = Add-Field Label 'Close MO2 before importing. The destination profile will be backed up.' 26 309 688 68
+        $keepSections = Add-Field CheckBox 'Recreate original separators' 26 280 600 27
+    $keepSections.Enabled = $false
+    $null = Add-Field Label 'Duplicate mods' 26 315 160 25
+    $duplicateMode = Add-Field ComboBox '' 192 311 522 28
+    $duplicateMode.DropDownStyle = 'DropDownList'
+    $duplicateMode.Items.AddRange(@('Stop and review', 'Keep existing and skip incoming', 'Rename incoming copies'))
+    $duplicateMode.SelectedIndex = 0
+    $duplicateMode.Anchor = 'Top,Left,Right'
+    $statusImport = Add-Field Label 'Close MO2 before importing. The destination profile will be backed up.' 26 344 688 58
     $statusImport.ForeColor = $muted
-    $back = Add-Field Button 'Back' 26 395 100 38
-    $go = Add-Field Button 'Preview.' 535 393 178 42
+    $back = Add-Field Button 'Back' 26 430 100 38
+    $go = Add-Field Button 'Preview.' 535 428 178 42
     $go.FlatStyle = 'Flat'
     $go.BackColor = $accent
     $go.ForeColor = [Drawing.Color]::White
     $w.FormBorderStyle = 'Sizable'
     $w.MinimumSize = $w.Size
-    $importVersion = Add-Field Label "v$AppVersion" 150 405 115 23
+    $importVersion = Add-Field Label "v$AppVersion" 150 440 115 23
     $importVersion.ForeColor = $muted
     foreach ($control in $package,$target,$statusImport,$newSeparator) { $control.Anchor = 'Top,Left,Right' }
     foreach ($control in $packageButton,$targetButton) { $control.Anchor = 'Top,Right' }
@@ -1328,27 +1617,43 @@ function Show-ImportWindow {
         if (!$target.Items.Contains($path)) { $null = $target.Items.Add($path) }
         $target.SelectedItem = $path
     })
-    $packageButton.Add_Click({
-        $path = Pick-ImportFolder
-        if (!$path) { return }
+    function Set-ImportBundle([string]$path) {
         try {
             $manifest = Get-Content -LiteralPath (Join-Path $path 'section.json') -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($manifest.version -ne 1 -or $manifest.format -notin 'individual','merged') { throw 'Unsupported export folder.' }
             $package.Text = $path
             $newSeparator.Text = $manifest.section
+            $keepSections.Enabled = $manifest.format -eq 'individual' -and @($manifest.mods | Where-Object section | Select-Object -ExpandProperty section -Unique).Count -gt 1
+            $script:canKeepSections = $keepSections.Enabled
+            if (!$keepSections.Enabled) { $keepSections.Checked = $false }
             $statusImport.Text = if ($manifest.format -eq 'merged') { 'Bundle contains one merged mod.' } else { "Bundle contains $(@($manifest.mods).Count) separate mods." }
-        } catch { $statusImport.Text = $_.Exception.Message }
+        } catch { $statusImport.Text = Get-UiMessage $_.Exception.Message }
+    }
+    $packageButton.Add_Click({
+        $path = Pick-ImportFolder
+        if ($path) { Set-ImportBundle $path }
     })
-    if ($target.Items.Count) { $target.SelectedIndex = 0 }
+    if ($DirectMods) {
+        $package.Text = 'Direct folder transfer'
+        $package.ReadOnly = $true
+        $packageButton.Visible = $false
+        $newSeparator.Text = $DirectSection
+        $keepSections.Enabled = @($DirectMods | Select-Object -ExpandProperty Section -Unique).Count -gt 1
+        $script:canKeepSections = $keepSections.Enabled
+        $statusImport.Text = 'Choose the destination MO2 instance and profile. Close MO2 before confirming.'
+    } elseif ($InitialPackage) {
+        Set-ImportBundle $InitialPackage
+        $statusImport.Text += ' Choose the destination instance and profile.'
+    } elseif ($target.Items.Count) { $target.SelectedIndex = 0 }
     $importTimer = New-Object Windows.Forms.Timer
     $importTimer.Interval = 150
     $script:importWorker = $null
     $w.Add_FormClosing({ param($sender,$eventArgs); if ($script:importWorker) { $eventArgs.Cancel = $true } })
-    $inputs = @($package,$packageButton,$target,$targetButton,$targetProfile,$newSeparator,$back,$go)
+    $inputs = @($package,$packageButton,$target,$targetButton,$targetProfile,$newSeparator,$duplicateMode,$back,$go)
     $importTimer.Add_Tick({
         $job = $script:importWorker
         $message = $null
-        while ($job.Queue.TryDequeue([ref]$message)) { $statusImport.Text = $message }
+        while ($job.Queue.TryDequeue([ref]$message)) { $statusImport.Text = Get-UiMessage $message }
         if (!$job.Handle.IsCompleted) { return }
         $importTimer.Stop()
         try {
@@ -1356,20 +1661,29 @@ function Show-ImportWindow {
             if ($job.Worker.HadErrors) { throw $job.Worker.Streams.Error[0] }
             if ($job.Preview) {
                 $summary = @(
-                    "Destination profile: $($result.Profile)"
-                    "New separator: $($newSeparator.Text)"
-                    "Mods: $($result.Jobs.Count)"
-                    ('Estimated extraction size: {0:N1} MiB' -f ($result.UnpackedBytes / 1MB))
+                    "$(Get-UiText 'Destination profile'): $($result.Profile)"
+                    "$(Get-UiText 'New separators'): $(($result.Separators -replace '_separator$','') -join ', ')"
+                    "$(Get-UiText 'Mods'): $($result.Jobs.Count)"
+                    ((Get-UiText 'Estimated extraction size') + (': {0:N1} MiB' -f ($result.UnpackedBytes / 1MB)))
                 )
-                if ($null -ne $result.FreeBytes) { $summary += ('Destination free space: {0:N1} MiB' -f ($result.FreeBytes / 1MB)) }
-                $summary += if ($result.HasChecksums) { 'ZIP checksums will be verified during import.' } else { 'Older export. ZIP checksums are unavailable.' }
+                if ($null -ne $result.FreeBytes) { $summary += ((Get-UiText 'Destination free space') + (': {0:N1} MiB' -f ($result.FreeBytes / 1MB))) }
+                $summary += if ($result.HasChecksums) { 'ZIP checksums verified in this dry run.' } elseif ($DirectMods) { 'Files will be copied directly. No ZIP is needed.' } else { Get-UiText 'Older export. ZIP checksums are unavailable.' }
                 $blocked = $result.Collisions.Count -gt 0 -or ($null -ne $result.FreeBytes -and $result.FreeBytes -lt $result.UnpackedBytes)
-                if ($result.Collisions.Count) { $summary += 'Name collisions: ' + ($result.Collisions -join ', ') }
-                if ($null -ne $result.FreeBytes -and $result.FreeBytes -lt $result.UnpackedBytes) { $summary += 'The destination has insufficient free space.' }
+                if ($result.Collisions.Count) { $summary += (Get-UiText 'Name collisions') + ': ' + ($result.Collisions -join ', ') }
+                if ($null -ne $result.FreeBytes -and $result.FreeBytes -lt $result.UnpackedBytes) { $summary += Get-UiText 'The destination has insufficient free space.' }
                 $summary += ''
                 $summary += @($result.Jobs | ForEach-Object { $_.Name + $(if ($_.Enabled) { ' (enabled)' } else { ' (disabled)' }) })
+                foreach ($group in @(
+                    @{ Title = 'Duplicate handling'; Items = $result.Decisions }
+                    @{ Title = 'Skyrim master checks'; Items = $result.Review.Dependencies }
+                    @{ Title = 'File overrides against enabled destination mods'; Items = $result.Review.Conflicts }
+                    @{ Title = 'Merged ZIP file winners'; Items = $result.MergeWinners }
+                    @{ Title = 'Review notes'; Items = $result.ReviewNotes }
+                )) {
+                    if ($group.Items.Count) { $summary += @('', $group.Title) + @($group.Items) }
+                }
                 $preview = New-Object Windows.Forms.Form
-                $preview.Text = 'Import preview'
+                $preview.Text = Get-UiText 'Import preview'
                 $preview.ClientSize = New-Object Drawing.Size(660, 450)
                 $preview.MinimumSize = $preview.Size
                 $preview.StartPosition = 'CenterParent'
@@ -1385,9 +1699,9 @@ function Show-ImportWindow {
                 $details.Text = $summary -join [Environment]::NewLine
                 $preview.Controls.Add($details)
                 $cancel = New-Object Windows.Forms.Button
-                $cancel.Text = Get-UiText 'Back'
+                $cancel.Text = 'Done without importing'
                 $cancel.DialogResult = 'Cancel'
-                $cancel.SetBounds(16,398,110,34)
+                $cancel.SetBounds(16,398,192,34)
                 $cancel.Anchor = 'Bottom,Left'
                 $preview.Controls.Add($cancel)
                 $confirm = New-Object Windows.Forms.Button
@@ -1405,11 +1719,12 @@ function Show-ImportWindow {
             }
             $statusImport.Text = "Imported $($result.Count) mod(s) under $($result.Separator)."
             [void][Windows.Forms.MessageBox]::Show($w, "$($statusImport.Text)$([Environment]::NewLine)Profile backup: $($result.Backup)", $w.Text)
-        } catch { $statusImport.Text = $_.Exception.Message }
+        } catch { $statusImport.Text = Get-UiMessage $_.Exception.Message }
         finally {
             $job.Worker.Dispose()
             $script:importWorker = $null
             foreach ($item in $inputs) { $item.Enabled = $true }
+            $keepSections.Enabled = $script:canKeepSections
             if ($script:confirmedImport) { Start-ImportWork $false }
         }
     })
@@ -1423,17 +1738,18 @@ function Show-ImportWindow {
         $queueImport = [Collections.Concurrent.ConcurrentQueue[string]]::new()
         try {
             $null = $workerImport.AddScript({
-                param($Script,$Package,$Target,$Profile,$Separator,$Queue,$Preview)
+                param($Script,$Package,$Target,$Profile,$Separator,$Queue,$Preview,$KeepSections,$Duplicates,$DirectMods)
                 . $Script -CoreOnly
-                if ($Preview) { Get-ImportPlan $Package $Target $Profile $Separator -Preview }
-                else { Import-Section $Package $Target $Profile $Separator { param($message); $Queue.Enqueue($message) } }
+                if ($Preview) { Get-ImportPlan $Package $Target $Profile $Separator -Preview -KeepSections:$KeepSections -DuplicateAction $Duplicates -DirectMods $DirectMods }
+                else { Import-Section $Package $Target $Profile $Separator { param($message); $Queue.Enqueue($message) } -KeepSections:$KeepSections -DuplicateAction $Duplicates -DirectMods $DirectMods }
             }).AddArgument($scriptFile).AddArgument($package.Text).AddArgument([string]$target.SelectedItem).
-                AddArgument([string]$targetProfile.SelectedItem).AddArgument($newSeparator.Text.Trim()).AddArgument($queueImport).AddArgument($Preview)
+                AddArgument([string]$targetProfile.SelectedItem).AddArgument($newSeparator.Text.Trim()).AddArgument($queueImport).AddArgument($Preview).AddArgument($keepSections.Checked).AddArgument(@('Block','Skip','Rename')[$duplicateMode.SelectedIndex]).AddArgument($DirectMods)
             $script:importWorker = @{ Preview = $Preview; Worker = $workerImport; Queue = $queueImport; Handle = $workerImport.BeginInvoke() }
             foreach ($item in $inputs) { $item.Enabled = $false }
-            $statusImport.Text = 'Checking import files...'
+            $keepSections.Enabled = $false
+            $statusImport.Text = Get-UiText 'Checking import files...'
             $importTimer.Start()
-        } catch { $workerImport.Dispose(); $statusImport.Text = $_.Exception.Message }
+        } catch { $workerImport.Dispose(); $statusImport.Text = Get-UiMessage $_.Exception.Message }
     }
     $go.Add_Click({ Start-ImportWork $true })
     $w.ForeColor = $form.ForeColor
@@ -1461,17 +1777,22 @@ function Select-Workflow {
     $startupTheme.SetBounds(505, 27, 106, 34)
     $startupTheme.Anchor = 'Top,Right'
     $welcome.Controls.Add($startupTheme)
-    $actions = @(@{Text='Import section';Result='Yes';X=26},@{Text='Export section';Result='No';X=326})
+    $actions = @(
+        @{ Text='Import section'; Result='Yes'; X=26 }
+        @{ Text='Export section'; Result='No'; X=225 }
+        @{ Text='Export & import'; Result='Retry'; X=424 }
+    )
     foreach ($action in $actions) {
         $button = New-Object Windows.Forms.Button
+        $button.UseMnemonic = $false
         $button.Tag = $action.Text
         $button.Text = Get-UiText $action.Text
         $button.DialogResult = $action.Result
-        $button.SetBounds($action.X, 103, 285, 91)
+        $button.SetBounds($action.X, 103, 187, 91)
         $button.FlatStyle = 'Flat'
         $button.BackColor = $surface
         $button.ForeColor = $accent
-        $button.Anchor = if ($action.X -eq 26) { 'Top,Left' } else { 'Top,Right' }
+        $button.Anchor = 'Top,Left'
         $welcome.Controls.Add($button)
     }
     $welcomeVersion = New-Object Windows.Forms.Label
@@ -1673,7 +1994,7 @@ function Update-ExportLanguage {
     $all.Text = Get-UiText 'Select shown'
     $none.Text = Get-UiText 'Clear shown'
     $reviewStep.Text = '2   ' + (Get-UiText 'Review dependencies')
-    $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } else { Get-UiText 'Export ZIPs...' }
+    $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } elseif ($script:exportThenImport) { Get-UiText 'Choose destination...' } else { Get-UiText 'Export ZIPs...' }
     $index = $format.SelectedIndex
     $format.Items.Clear()
     $null = $format.Items.Add((Get-UiText 'Individual ZIPs'))
@@ -1687,6 +2008,29 @@ if ($install.Items.Count) { $install.SelectedIndex = 0 }
 while ($true) {
     $workflow = Select-Workflow
     if ($workflow -eq 'Yes') { Show-ImportWindow; continue }
+    if ($workflow -eq 'Retry') {
+        $script:exportThenImport = $true
+        $script:pendingDirect = $null
+        $previousFormat = $format.SelectedIndex
+        $format.SelectedIndex = 0
+        $format.Visible = $false
+        $formatLabel.Visible = $false
+        $formatHelp.Text = 'Selected mod folders will be copied directly to another MO2 installation.'
+        if (!$reviewToggle.Checked) { $export.Text = Get-UiText 'Choose destination...' }
+        try { [void]$form.ShowDialog() } finally {
+            $script:exportThenImport = $false
+            $format.SelectedIndex = $previousFormat
+            $format.Visible = $true
+            $formatLabel.Visible = $true
+            $export.Text = if ($reviewToggle.Checked) { Get-UiText 'Review selection' } else { Get-UiText 'Export ZIPs...' }
+            if ($format.SelectedIndex -eq 0) { $formatHelp.Text = '' }
+        }
+        if ($script:pendingDirect) {
+            Show-ImportWindow '' $script:pendingDirect.Mods $script:pendingDirect.Section
+            $script:pendingDirect = $null
+        }
+        continue
+    }
     if ($workflow -eq 'No') { [void]$form.ShowDialog() }
     break
 }
