@@ -6,7 +6,7 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 
 ## Download
 
-- [Download v0.1.8 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.8/MO2-Section-Exporter-v0.1.8.exe)
+- [Download v0.1.8 Preview for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/raw/refs/heads/main/downloads/MO2-Section-Exporter-v0.1.8-preview.exe)
 
 Open the downloaded EXE directly.
 
