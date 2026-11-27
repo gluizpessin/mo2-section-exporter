@@ -6,7 +6,7 @@ Portable Windows utility for transferring selected mod sections between Mod Orga
 
 ## Download
 
-- [Download v0.1.3 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.3/MO2-Section-Exporter-v0.1.3.exe)
+- [Download v0.1.8 for Windows (.exe)](https://github.com/gluizpessin/mo2-section-exporter/releases/download/v0.1.8/MO2-Section-Exporter-v0.1.8.exe)
 
 Open the downloaded EXE directly.
 
@@ -33,6 +33,10 @@ Start the app and choose **Export section** or **Import section**.
 
 ![Startup screen with Import section and Export section buttons](docs/mo2-start.png)
 
+### Export & import
+
+Choose **Export & import** to copy mods directly between two existing MO2 installations. Pick the source profile and mods, then choose the destination profile and separator. Review the planned changes before confirming. The app copies separate mod folders and backs up the destination profile.
+
 ### Export
 
 1. Open the portable executable and select an MO2 installation, profile, and separator.
@@ -48,12 +52,14 @@ The export screen shows the source profile, separator, mod checklist, and export
 
 ![Export screen with the mod checklist, archive format, and dependency review toggle](docs/mo2-export.png)
 
+Use **More sections…** to select mods from multiple separators. Individual ZIPs can restore those groups during import.
+
 ### Import
 
 1. Close Mod Organizer 2, then choose **Import section**.
 2. Choose the saved folder containing section.json and the ZIPs.
 3. Pick the destination portable MO2 installation and profile. Enter a name for the new separator.
-4. Click **Preview…** to check the mod list, destination, extraction size, and name collisions. Confirm the import, then reopen MO2 and check your right-pane plugin order.
+4. Click **Preview…** to check the mod list, destination, extraction size, declared plugin masters, file overrides, and name collisions. Choose whether to skip or rename incoming duplicate mods. Confirm the import, then reopen MO2 and check your right-pane plugin order.
 
 ![Import screen with the export folder, destination profile, and new separator filled in](docs/mo2-import.png)
 
