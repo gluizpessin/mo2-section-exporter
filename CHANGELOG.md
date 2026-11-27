@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8
+
+- **Export & import** copies selected mod folders directly between two MO2 installations. Review the destination before confirming. The destination profile is backed up.
+- **Export** uses Fast Deflate automatically. Choose individual ZIPs or one merged ZIP.
+- Select multiple separators for export. Individual backups can restore the original groups under a chosen prefix.
+- Import preview verifies stored ZIP checksums, checks declared Skyrim plugin masters, shows file overrides, and offers skip or rename for duplicate mods.
+- Expanded localization for progress, import preview, and common warnings.
+
 ## 0.1.3
 
 - Preview the destination profile, separator, mods, estimated extraction size, free space, and name collisions before importing.
